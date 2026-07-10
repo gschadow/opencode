@@ -101,6 +101,15 @@ export class ForbiddenError extends Schema.TaggedErrorClass<ForbiddenError>()(
   { httpApiStatus: 403 },
 ) {}
 
+export class SecureInputNotFoundError extends Schema.TaggedErrorClass<SecureInputNotFoundError>()(
+  "SecureInputNotFoundError",
+  {
+    requestID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
 export class PtyNotFoundError extends Schema.TaggedErrorClass<PtyNotFoundError>()(
   "PtyNotFoundError",
   {

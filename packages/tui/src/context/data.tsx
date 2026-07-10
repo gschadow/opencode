@@ -40,6 +40,7 @@ type Data = {
     message: Record<string, SessionMessage[]>
     permission: Record<string, PermissionV2Request[]>
     question: Record<string, QuestionV2Request[]>
+    secureInput: Record<string, { id: string; sessionID: string; sessionName: string; prompt: string }[]>
   }
   project: {
     permission: Record<string, PermissionSavedInfo[]>
@@ -64,6 +65,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
         message: {},
         permission: {},
         question: {},
+        secureInput: {},
       },
       project: {
         permission: {},

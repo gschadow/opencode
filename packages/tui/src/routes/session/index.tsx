@@ -66,6 +66,7 @@ import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
+import { SecureInputPrompt } from "../../component/dialog-secure-input"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
@@ -232,8 +233,12 @@ export function Session() {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
-  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
-  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
+  const secureInputs = createMemo(() => {
+    if (session()?.parentID) return []
+    return children().flatMap((x) => sync.data.secure_input[x.id] ?? [])
+  })
+  const visible = createMemo(() => !session()?.parentID && secureInputs().length === 0 && permissions().length === 0 && questions().length === 0)
+  const disabled = createMemo(() => secureInputs().length > 0 || permissions().length > 0 || questions().length > 0)
 
   const pending = createMemo(() => {
     const completed = messages().findLast((x) => x.role === "assistant" && x.time.completed)?.id
@@ -1280,13 +1285,16 @@ export function Session() {
                 </For>
               </scrollbox>
               <box flexShrink={0}>
-                <Show when={permissions().length > 0}>
+                <Show when={secureInputs().length > 0}>
+                  <SecureInputPrompt request={secureInputs()[0]} />
+                </Show>
+                <Show when={secureInputs().length === 0 && permissions().length > 0}>
                   <PermissionPrompt
                     request={permissions()[0]}
                     directory={sync.session.get(permissions()[0].sessionID)?.directory}
                   />
                 </Show>
-                <Show when={permissions().length === 0 && questions().length > 0}>
+                <Show when={secureInputs().length === 0 && permissions().length === 0 && questions().length > 0}>
                   <QuestionPrompt
                     request={questions()[0]}
                     directory={sync.session.get(questions()[0].sessionID)?.directory}

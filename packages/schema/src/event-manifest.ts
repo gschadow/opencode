@@ -19,6 +19,7 @@ import { ProjectDirectories } from "./project-directories"
 import { Pty } from "./pty"
 import { Question } from "./question"
 import { QuestionV1 } from "./question-v1"
+import { SecureInput } from "./secure-input"
 import { Reference } from "./reference"
 import { ServerEvent } from "./server-event"
 import { SessionCompactionEvent } from "./session-compaction-event"
@@ -52,6 +53,7 @@ const featureDefinitions = Event.inventory(
   ...FileSystemWatcher.Event.Definitions,
   ...Pty.Event.Definitions,
   ...Question.Event.Definitions,
+  ...SecureInput.Event.Definitions,
 )
 
 export const ServerDefinitions = Event.inventory(

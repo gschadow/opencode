@@ -20,6 +20,13 @@ import type {
   SnapshotFileDiff,
   ConsoleState,
 } from "@opencode-ai/sdk/v2"
+
+type SecureInputRequest = {
+  id: string
+  sessionID: string
+  sessionName: string
+  prompt: string
+}
 import { createStore, produce, reconcile } from "solid-js/store"
 import { useProject } from "./project"
 import { useEvent } from "./event"
@@ -79,6 +86,9 @@ export const {
       question: {
         [sessionID: string]: QuestionRequest[]
       }
+      secure_input: {
+        [sessionID: string]: SecureInputRequest[]
+      }
       config: Config
       session: Session[]
       session_status: {
@@ -121,6 +131,7 @@ export const {
       agent: [],
       permission: {},
       question: {},
+      secure_input: {},
       command: [],
       provider: [],
       provider_default: {},
@@ -251,6 +262,45 @@ export const {
             request.sessionID,
             produce((draft) => {
               draft.splice(match.index, 0, request)
+            }),
+          )
+          break
+        }
+
+        case "secure.input.replied" as string:
+        case "secure.input.rejected" as string: {
+          const props = (event as any).properties
+          const secRequests = store.secure_input[props.sessionID]
+          if (!secRequests) break
+          const secMatch = search(secRequests, props.requestID, (r) => r.id)
+          if (!secMatch.found) break
+          setStore(
+            "secure_input",
+            props.sessionID,
+            produce((draft) => {
+              draft.splice(secMatch.index, 1)
+            }),
+          )
+          break
+        }
+
+        case "secure.input.asked" as string: {
+          const secRequest = (event as any).properties as SecureInputRequest
+          const secRequests2 = store.secure_input[secRequest.sessionID]
+          if (!secRequests2) {
+            setStore("secure_input", secRequest.sessionID, [secRequest])
+            break
+          }
+          const secMatch2 = search(secRequests2, secRequest.id, (r) => r.id)
+          if (secMatch2.found) {
+            setStore("secure_input", secRequest.sessionID, secMatch2.index, reconcile(secRequest))
+            break
+          }
+          setStore(
+            "secure_input",
+            secRequest.sessionID,
+            produce((draft) => {
+              draft.splice(secMatch2.index, 0, secRequest)
             }),
           )
           break

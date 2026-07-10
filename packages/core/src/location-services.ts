@@ -22,6 +22,7 @@ import { Policy } from "./policy"
 import { ProjectCopy } from "./project/copy"
 import { Pty } from "./pty"
 import { QuestionV2 } from "./question"
+import { SecureInputV2 } from "./secure-input"
 import { Reference } from "./reference"
 import { ReferenceGuidance } from "./reference/guidance"
 import * as SessionRunnerLLM from "./session/runner/llm"
@@ -71,6 +72,7 @@ export const locationServices = LayerNode.group([
   ReferenceGuidance.node,
   SessionTodo.node,
   QuestionV2.node,
+  SecureInputV2.node,
   ReadToolFileSystem.node,
   BuiltInTools.node,
   SessionRunnerModel.node,

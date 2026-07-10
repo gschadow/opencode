@@ -18,6 +18,7 @@ import { ModelV2 } from "../../model"
 import { PermissionV2 } from "../../permission"
 import { ProviderV2 } from "../../provider"
 import { QuestionV2 } from "../../question"
+import { SecureInputV2 } from "../../secure-input"
 import { SystemContext } from "../../system-context/index"
 import { SystemContextRegistry } from "../../system-context/registry"
 import { SkillGuidance } from "../../skill/guidance"
@@ -256,17 +257,67 @@ const layer = Layer.effect(
                   call: event,
                 }),
               ).pipe(
-                Effect.flatMap((settlement) =>
-                  publish(
-                    LLMEvent.toolResult({
-                      id: event.id,
-                      name: event.name,
-                      result: settlement.result,
-                      output: settlement.output,
+                Effect.flatMap((settlement) => {
+                  const text = typeof settlement.result?.value === "string" ? settlement.result.value : "";
+                  if (!text.startsWith("__SECURE_INPUT__"))
+                    return publish(
+                      LLMEvent.toolResult({
+                        id: event.id,
+                        name: event.name,
+                        result: settlement.result,
+                        output: settlement.output,
+                      }),
+                      settlement.outputPaths ?? [],
+                    )
+
+                  const rest = text.slice("__SECURE_INPUT__".length)
+                  const sep = rest.indexOf("|")
+                  const sessionName = rest.slice(0, sep)
+                  const prompt = rest.slice(sep + 1)
+
+                  return SecureInputV2.Service.pipe(
+                    Effect.flatMap((secureInput) =>
+                      restore(secureInput.request({ sessionID: session.id, sessionName, prompt })),
+                    ),
+                    Effect.catchTag("SecureInputV2.RejectedError", () => Effect.succeed("")),
+                    Effect.flatMap((password) => {
+                      if (!password)
+                        return publish(
+                          LLMEvent.toolResult({
+                            id: event.id,
+                            name: event.name,
+                            result: { type: "text", value: "" },
+                          }),
+                        )
+                      const secondCall = {
+                        type: "tool-call" as const,
+                        id: event.id,
+                        name: event.name,
+                        input: JSON.stringify({ name: sessionName, input: password }),
+                      }
+                      return restore(
+                        toolMaterialization.settle({
+                          sessionID: session.id,
+                          agent: agent.id,
+                          assistantMessageID,
+                          call: secondCall,
+                        }),
+                      ).pipe(
+                        Effect.flatMap((second) =>
+                          publish(
+                            LLMEvent.toolResult({
+                              id: event.id,
+                              name: event.name,
+                              result: second.result,
+                              output: second.output,
+                            }),
+                            second.outputPaths ?? [],
+                          ),
+                        ),
+                      )
                     }),
-                    settlement.outputPaths ?? [],
-                  ),
-                ),
+                  )
+                }),
               ),
             ).pipe(FiberSet.run(toolFibers))
           }),
