@@ -8,6 +8,13 @@
   </a>
 </p>
 <p align="center">The open source AI coding agent.</p>
+
+> **This is a fork** of [anomalyco/opencode](https://github.com/anomalyco/opencode)
+> maintained for the `opencode-dev` portable deployment stack. It adds
+> [secure-input dialog support for MCP tools](#fork-modifications),
+> inverts the dev-channel database naming, and fixes `opencode attach`
+> directory routing. See the fork modifications section below.
+
 <p align="center">
   <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
@@ -123,6 +130,33 @@ If you're interested in contributing to OpenCode, please read our [contributing 
 ### Building on OpenCode
 
 If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+
+## Fork modifications
+
+This fork of `anomalyco/opencode` adds the following changes not present upstream:
+
+- **Secure-input dialog for MCP tools** — MCP servers can request secret user input
+  (passwords, passphrases, API keys) via a centered, masked TUI modal without the
+  value ever entering the LLM context. Uses a nested MCP JSON-RPC request
+  (`opencode/secure-input`) with invocation tokens, an Effect deferred-based
+  service in Core, a TUI modal with bullet-masked input, and generated SDK types.
+  Affects `packages/core/src/secure-input.ts`, `packages/opencode/src/mcp/index.ts`,
+  `packages/tui/src/component/dialog-secure-input.tsx`, and 20 other files.
+
+- **Invert channel-DB opt-in** (`packages/core/src/database/database.ts`) —
+  Upstream uses `opencode-dev.db` for dev builds. This fork always uses `opencode.db`;
+  opt in to channel naming with `OPENCODE_ENABLE_CHANNEL_DB=1`.
+
+- **Fix `opencode attach` directory routing** (`packages/opencode/src/cli/cmd/attach.ts`) —
+  When `--dir` is omitted, the client's `process.cwd()` is used instead of the
+  server process working directory.
+
+- **Session list directory filter** (`packages/opencode/src/session/session.ts`) —
+  `Session.list` passes the client directory to `listByProject` when no explicit
+  filter is provided.
+
+- **OpenAI chat protocol fix** (`packages/llm/src/protocols/openai-chat.ts`) —
+  Compatibility adjustment for LLM protocol handling.
 
 ---
 
