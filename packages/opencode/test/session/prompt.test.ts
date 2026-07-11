@@ -117,6 +117,7 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
       clients: () => Effect.succeed({}),
       instructions: () => Effect.succeed(instructions),
       tools: () => Effect.succeed({}),
+      callTool: () => Effect.die("unexpected MCP tool call in prompt-effect tests"),
       prompts: () => Effect.succeed({}),
       resources: () => Effect.succeed({}),
       resourceTemplates: () => Effect.succeed({}),

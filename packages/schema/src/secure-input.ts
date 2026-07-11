@@ -3,14 +3,14 @@ export * as SecureInput from "./secure-input"
 import { Schema } from "effect"
 import { optional } from "./schema"
 import { define, inventory } from "./event"
+import { ascending } from "./identifier"
 import { SessionID } from "./session-id"
 import { statics } from "./schema"
 
-export const ID = Schema.String.pipe(
+export const ID = Schema.String.check(Schema.isStartsWith("sec_")).pipe(
   Schema.brand("SecureInput.ID"),
   statics((schema) => {
-    let counter = 0
-    const create = () => schema.make("sec_" + (++counter).toString(36))
+    const create = () => schema.make("sec_" + ascending())
     return { create, ascending: (id?: string) => (id === undefined ? create() : schema.make(id)) }
   }),
 )
@@ -21,6 +21,7 @@ export const Request = Schema.Struct({
   sessionID: SessionID,
   sessionName: Schema.String,
   prompt: Schema.String,
+  command: optional(Schema.String),
 }).annotate({ identifier: "SecureInput.Request" })
 export interface Request extends Schema.Schema.Type<typeof Request> {}
 

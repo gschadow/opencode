@@ -175,6 +175,7 @@ import type {
   QuestionReplyErrors,
   QuestionReplyResponses,
   QuestionV2Reply,
+  SecureInputReply,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionChildrenErrors,
@@ -333,6 +334,8 @@ import type {
   V2QuestionRequestListResponses,
   V2ReferenceListErrors,
   V2ReferenceListResponses,
+  V2SecureInputRequestListErrors,
+  V2SecureInputRequestListResponses,
   V2SessionActiveErrors,
   V2SessionActiveResponses,
   V2SessionCompactErrors,
@@ -377,6 +380,12 @@ import type {
   V2SessionRevertCommitResponses,
   V2SessionRevertStageErrors,
   V2SessionRevertStageResponses,
+  V2SessionSecureInputListErrors,
+  V2SessionSecureInputListResponses,
+  V2SessionSecureInputRejectErrors,
+  V2SessionSecureInputRejectResponses,
+  V2SessionSecureInputReplyErrors,
+  V2SessionSecureInputReplyResponses,
   V2SessionSwitchAgentErrors,
   V2SessionSwitchAgentResponses,
   V2SessionSwitchModelErrors,
@@ -5423,6 +5432,113 @@ export class Question2 extends HeyApiClient {
   }
 }
 
+export class Input extends HeyApiClient {
+  /**
+   * List session secure input requests
+   *
+   * Retrieve pending secure input requests owned by a session.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
+    return (options?.client ?? this.client).get<
+      V2SessionSecureInputListResponses,
+      V2SessionSecureInputListErrors,
+      ThrowOnError
+    >({
+      url: "/api/session/{sessionID}/secure-input",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Reply to pending secure input request
+   *
+   * Provide a value for a pending secure input request.
+   */
+  public reply<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      requestID: string
+      secureInputReply: SecureInputReply
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "requestID" },
+            { key: "secureInputReply", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V2SessionSecureInputReplyResponses,
+      V2SessionSecureInputReplyErrors,
+      ThrowOnError
+    >({
+      url: "/api/session/{sessionID}/secure-input/{requestID}/reply",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Reject pending secure input request
+   *
+   * Reject a pending secure input request owned by a session.
+   */
+  public reject<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      requestID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "requestID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V2SessionSecureInputRejectResponses,
+      V2SessionSecureInputRejectErrors,
+      ThrowOnError
+    >({
+      url: "/api/session/{sessionID}/secure-input/{requestID}/reject",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class Secure extends HeyApiClient {
+  private _input?: Input
+  get input(): Input {
+    return (this._input ??= new Input({ client: this.client }))
+  }
+}
+
 export class Session3 extends HeyApiClient {
   /**
    * List sessions
@@ -5870,6 +5986,11 @@ export class Session3 extends HeyApiClient {
   private _question?: Question2
   get question(): Question2 {
     return (this._question ??= new Question2({ client: this.client }))
+  }
+
+  private _secure?: Secure
+  get secure(): Secure {
+    return (this._secure ??= new Secure({ client: this.client }))
   }
 }
 
@@ -6847,6 +6968,48 @@ export class Question3 extends HeyApiClient {
   }
 }
 
+export class Request3 extends HeyApiClient {
+  /**
+   * List pending secure input requests
+   *
+   * Retrieve pending secure input requests for a location.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      location?: {
+        directory?: string
+        workspace?: string
+      }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "location" }] }])
+    return (options?.client ?? this.client).get<
+      V2SecureInputRequestListResponses,
+      V2SecureInputRequestListErrors,
+      ThrowOnError
+    >({
+      url: "/api/secure-input/request",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class Input2 extends HeyApiClient {
+  private _request?: Request3
+  get request(): Request3 {
+    return (this._request ??= new Request3({ client: this.client }))
+  }
+}
+
+export class Secure2 extends HeyApiClient {
+  private _input?: Input2
+  get input(): Input2 {
+    return (this._input ??= new Input2({ client: this.client }))
+  }
+}
+
 export class Reference extends HeyApiClient {
   /**
    * List references
@@ -7061,6 +7224,11 @@ export class V2 extends HeyApiClient {
   private _question?: Question3
   get question(): Question3 {
     return (this._question ??= new Question3({ client: this.client }))
+  }
+
+  private _secure?: Secure2
+  get secure(): Secure2 {
+    return (this._secure ??= new Secure2({ client: this.client }))
   }
 
   private _reference?: Reference

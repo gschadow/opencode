@@ -66,7 +66,7 @@ import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
-import { SecureInputPrompt } from "../../component/dialog-secure-input"
+import { DialogSecureInput } from "../../component/dialog-secure-input"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
@@ -351,6 +351,53 @@ export function Session() {
   const keymap = useOpencodeKeymap()
   const dialog = useDialog()
   const renderer = useRenderer()
+  let secureInputDialog: string | undefined
+
+  createEffect(() => {
+    const request = secureInputs()[0]
+    if (!request) {
+      if (secureInputDialog) dialog.clear()
+      secureInputDialog = undefined
+      return
+    }
+    if (secureInputDialog === request.id) return
+    secureInputDialog = request.id
+    let settled = false
+
+    const respond = async (action: "reply" | "reject", value?: string) => {
+      if (settled) return
+      settled = true
+      try {
+        const response = await sdk.request(
+          `/api/session/${request.sessionID}/secure-input/${request.id}/${action}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: action === "reply" ? JSON.stringify({ value }) : undefined,
+          },
+        )
+        if (!response.ok) throw new Error(`Secure input ${action} failed: ${response.status}`)
+        secureInputDialog = undefined
+        dialog.clear()
+      } catch (error) {
+        settled = false
+        throw error
+      }
+    }
+
+    dialog.replace(
+      () => (
+        <DialogSecureInput
+          request={request}
+          onConfirm={(value) => void respond("reply", value).catch((error) => toast.error(error))}
+          onCancel={() => void respond("reject").catch((error) => toast.error(error))}
+        />
+      ),
+      () => {
+        if (!settled) void respond("reject").catch((error) => toast.error(error))
+      },
+    )
+  })
 
   event.on("session.status", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
@@ -1285,9 +1332,6 @@ export function Session() {
                 </For>
               </scrollbox>
               <box flexShrink={0}>
-                <Show when={secureInputs().length > 0}>
-                  <SecureInputPrompt request={secureInputs()[0]} />
-                </Show>
                 <Show when={secureInputs().length === 0 && permissions().length > 0}>
                   <PermissionPrompt
                     request={permissions()[0]}

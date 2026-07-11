@@ -39,6 +39,7 @@ const mcp = Layer.succeed(
     clients: () => Effect.succeed({}),
     instructions: () => Effect.succeed([]),
     tools: () => Effect.succeed({}),
+    callTool: () => Effect.die("unexpected MCP tool call"),
     prompts: () => Effect.succeed({}),
     resources: () => Effect.succeed({}),
     resourceTemplates: () => Effect.succeed({}),

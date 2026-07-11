@@ -31,6 +31,7 @@ export interface RequestInput {
   readonly sessionID: SessionSchema.ID
   readonly sessionName: string
   readonly prompt: string
+  readonly command?: string
 }
 
 export interface ReplyInput {
@@ -52,21 +53,12 @@ interface Pending {
   readonly deferred: Deferred.Deferred<string, RejectedError>
 }
 
+const pending = new Map<ID, Pending>()
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const events = yield* EventV2.Service
-    const pending = new Map<ID, Pending>()
-
-    yield* Effect.addFinalizer(() =>
-      Effect.forEach(pending.values(), (item) => Deferred.fail(item.deferred, new RejectedError()), {
-        discard: true,
-      }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => { pending.clear() }),
-        ),
-      ),
-    )
 
     const request = Effect.fn("SecureInputV2.request")((input: RequestInput) =>
       Effect.uninterruptibleMask((restore) =>

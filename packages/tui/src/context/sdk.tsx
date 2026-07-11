@@ -146,6 +146,11 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       event: emitter,
       fetch: props.fetch ?? fetch,
       url: props.url,
+      request(path: string, init?: RequestInit) {
+        const headers = new Headers(props.headers)
+        new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+        return (props.fetch ?? fetch)(new URL(path, props.url), { ...init, headers, signal: abort.signal })
+      },
     }
   },
 })

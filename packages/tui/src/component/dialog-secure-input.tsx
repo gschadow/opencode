@@ -1,105 +1,77 @@
-import { TextareaRenderable } from "@opentui/core"
+import { TextAttributes } from "@opentui/core"
+import { useKeyboard } from "@opentui/solid"
+import { createSignal, onCleanup, onMount } from "solid-js"
 import { useTheme } from "../context/theme"
-import { Show, createSignal, onMount } from "solid-js"
-import { useBindings } from "../keymap"
-import { useTuiConfig } from "../config"
+import { useDialog } from "../ui/dialog"
 
 export type SecureInputRequest = {
   id: string
   sessionID: string
   sessionName: string
   prompt: string
+  command?: string
 }
 
-function apiPost(url: string, body?: Record<string, unknown>) {
-  return fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  }).catch(() => {})
-}
-
-export function SecureInputPrompt(props: { request: SecureInputRequest }) {
+export function DialogSecureInput(props: {
+  request: SecureInputRequest
+  onConfirm: (value: string) => void
+  onCancel: () => void
+}) {
+  const dialog = useDialog()
   const { theme } = useTheme()
-  const tuiConfig = useTuiConfig()
-  const [textareaTarget, setTextareaTarget] = createSignal<TextareaRenderable>()
-  let textarea: TextareaRenderable
+  const [value, setValue] = createSignal("")
 
-  function submit() {
-    const value = textarea?.plainText ?? ""
-    void apiPost(`/api/session/${props.request.sessionID}/secure-input/${props.request.id}/reply`, { value })
-  }
+  onMount(() => dialog.setSize("medium"))
+  onCleanup(() => setValue(""))
 
-  function reject() {
-    void apiPost(`/api/session/${props.request.sessionID}/secure-input/${props.request.id}/reject`)
-  }
-
-  useBindings(() => ({
-    target: textareaTarget,
-    enabled: textareaTarget() !== undefined,
-    priority: 1,
-    commands: [
-      {
-        name: "dialog.prompt.submit",
-        title: "Submit secure input",
-        category: "Dialog",
-        run: submit,
-      },
-    ],
-    bindings: tuiConfig.keybinds.gather("dialog.prompt", ["dialog.prompt.submit"]),
-  }))
-
-  onMount(() => {
-    if (!textarea || textarea.isDestroyed) return
-    textarea.focus()
-    textarea.gotoLineEnd()
+  useKeyboard((event) => {
+    if (event.eventType === "release") return
+    if (event.name === "return") {
+      event.preventDefault()
+      event.stopPropagation()
+      props.onConfirm(value())
+      return
+    }
+    if (event.name === "escape") {
+      event.preventDefault()
+      event.stopPropagation()
+      props.onCancel()
+      return
+    }
+    if (event.name === "backspace" || event.name === "delete") {
+      event.preventDefault()
+      event.stopPropagation()
+      setValue((current) => Array.from(current).slice(0, -1).join(""))
+      return
+    }
+    if (event.ctrl || event.meta || event.sequence.length === 0 || /[\u0000-\u001f\u007f]/u.test(event.sequence)) return
+    event.preventDefault()
+    event.stopPropagation()
+    setValue((current) => current + event.sequence)
   })
 
   return (
-    <box
-      backgroundColor={theme.backgroundPanel}
-      border={["left"]}
-      borderColor={theme.warning}
-    >
-      <box gap={1} paddingLeft={2} paddingRight={3} paddingTop={1} paddingBottom={1}>
-        <box>
-          <text fg={theme.warning}>
-            Secure input for <span style={{ fg: theme.secondary }}>{props.request.sessionName}</span>
-          </text>
-        </box>
-        <box>
-          <text fg={theme.textMuted}>{props.request.prompt}</text>
-        </box>
-        <textarea
-          height={1}
-          ref={(val: TextareaRenderable) => {
-            textarea = val
-            setTextareaTarget(val)
-          }}
-          placeholder="Type your response and press submit"
-          placeholderColor={theme.textMuted}
-          textColor={theme.text}
-          focusedTextColor={theme.text}
-          cursorColor={theme.text}
-        />
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <box flexDirection="row" justifyContent="space-between">
+        <text attributes={TextAttributes.BOLD} fg={theme.text}>
+          Secure input for {props.request.sessionName}
+        </text>
+        <text fg={theme.textMuted}>esc</text>
       </box>
-      <box
-        flexDirection="row"
-        flexShrink={0}
-        gap={1}
-        paddingLeft={2}
-        paddingRight={3}
-        paddingBottom={1}
-        justifyContent="space-between"
-      >
-        <box flexDirection="row" gap={2}>
-          <text fg={theme.text}>
-            enter <span style={{ fg: theme.textMuted }}>submit</span>
-          </text>
-          <text fg={theme.text}>
-            esc <span style={{ fg: theme.textMuted }}>dismiss</span>
-          </text>
-        </box>
+      <text fg={theme.textMuted}>{props.request.prompt}</text>
+      {props.request.command && (
+        <text fg={theme.textMuted}>{props.request.command}</text>
+      )}
+      <box backgroundColor={theme.backgroundElement} paddingLeft={1} paddingRight={1} minHeight={1}>
+        <text fg={theme.text}>{"•".repeat(Array.from(value()).length) || " "}</text>
+      </box>
+      <box flexDirection="row" gap={2}>
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>submit</span>
+        </text>
+        <text fg={theme.text}>
+          backspace <span style={{ fg: theme.textMuted }}>delete</span>
+        </text>
       </box>
     </box>
   )

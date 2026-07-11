@@ -151,6 +151,18 @@ async function buildTool() {
     Layer.mock(MCP.Service, {
       tools: () => Effect.succeed(mcpTools),
       clients: () => Effect.succeed({ [SERVER]: {} as any }),
+      callTool: (input) =>
+        Effect.tryPromise({
+          try: () =>
+            McpCatalog.callTool(
+              input.tool.def,
+              input.tool.client,
+              input.arguments,
+              { abortSignal: input.signal },
+              input.tool.timeout,
+            ),
+          catch: (error) => error,
+        }),
     }),
   )
   return {

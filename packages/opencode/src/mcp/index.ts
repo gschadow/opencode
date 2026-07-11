@@ -9,6 +9,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import {
+  type CallToolResult,
   ListRootsRequestSchema,
   type LoggingMessageNotification,
   LoggingMessageNotificationSchema,
@@ -34,8 +35,10 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { McpCatalog } from "./catalog"
 import { McpEvent } from "@opencode-ai/schema/mcp-event"
 import { McpBrowser } from "./browser"
+import { SecureInputV2 } from "@opencode-ai/core/secure-input"
 
 const DEFAULT_TIMEOUT = 30_000
+const SECURE_INPUT_TIMEOUT = 10 * 60_000
 const CLIENT_OPTIONS = {
   capabilities: {
     // https://github.com/anomalyco/opencode/issues/11948
@@ -72,11 +75,23 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("MCP
 
 type MCPClient = Client
 
-function createClient(directory: string) {
+function createClient(
+  directory: string,
+  onSecureInput?: (token: string, sessionName: string, prompt: string, command: string) => Promise<{ value: string }>,
+) {
   const client = new Client({ name: "opencode", version: InstallationVersion }, CLIENT_OPTIONS)
   client.setRequestHandler(ListRootsRequestSchema, () =>
     Promise.resolve({ roots: [{ uri: pathToFileURL(directory).href }] }),
   )
+  if (onSecureInput) {
+    const fallback = client.fallbackRequestHandler
+    client.fallbackRequestHandler = (request: any, extra: any) => {
+      if (request.method === "opencode/secure-input" && request.params?.token) {
+        return onSecureInput(request.params.token, request.params.sessionName, request.params.prompt, request.params.command ?? "")
+      }
+      return fallback?.(request, extra) as any
+    }
+  }
   return client
 }
 
@@ -166,6 +181,12 @@ export interface Interface {
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
   readonly tools: () => Effect.Effect<Record<string, McpTool>>
+  readonly callTool: (input: {
+    tool: McpTool
+    arguments: unknown
+    sessionID: string
+    signal?: AbortSignal
+  }) => Effect.Effect<CallToolResult, unknown>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: (clientName?: string) => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly resourceTemplates: (
@@ -208,6 +229,10 @@ const layer = Layer.effect(
     const auth = yield* McpAuth.Service
     const events = yield* EventV2Bridge.Service
     const browser = yield* McpBrowser.Service
+    const secureInput = yield* SecureInputV2.Service
+    const run = yield* EffectBridge.make()
+    const secureInputClients = new WeakSet<MCPClient>()
+    const pendingSecureInput = new Map<string, { sessionID: string }>()
 
     type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -215,14 +240,37 @@ const layer = Layer.effect(
      * Connect a client via the given transport with resource safety:
      * on failure the transport is closed; on success the caller owns it.
      */
-    const connectTransport = Effect.fn("MCP.connectTransport")(function* (transport: Transport, timeout: number) {
+    const connectTransport = Effect.fn("MCP.connectTransport")(function* (
+      key: string,
+      transport: Transport,
+      timeout: number,
+      allowSecureInput = false,
+    ) {
       const directory = yield* InstanceState.directory
       return yield* Effect.acquireUseRelease(
         Effect.succeed(transport),
         (t) =>
           Effect.tryPromise({
             try: () => {
-              const client = createClient(directory)
+              const client = createClient(
+                directory,
+                allowSecureInput
+                  ? async (token, sessionName, prompt, command) => {
+                      const pending = pendingSecureInput.get(token)
+                      if (!pending) throw new Error("Invalid secure-input capability")
+                      const value = await run.promise(
+                        secureInput.request({
+                          sessionID: pending.sessionID as SecureInputV2.Request["sessionID"],
+                          sessionName,
+                          prompt,
+                          command,
+                        }),
+                      )
+                      return { value }
+                    }
+                  : undefined,
+              )
+              if (allowSecureInput) secureInputClients.add(client)
               return withTimeout(client.connect(t), timeout).then(() => client)
             },
             catch: (e) => (e instanceof Error ? e : new Error(String(e))),
@@ -287,7 +335,7 @@ const layer = Layer.effect(
       let lastStatus: Status | undefined
 
       for (const { name, transport } of transports) {
-        const result = yield* connectTransport(transport, connectTimeout).pipe(
+        const result = yield* connectTransport(key, transport, connectTimeout).pipe(
           Effect.map((client) => ({ client, transportName: name })),
           Effect.catch((error) => {
             const lastError = error instanceof Error ? error : new Error(String(error))
@@ -357,7 +405,7 @@ const layer = Layer.effect(
       })
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
-      return yield* connectTransport(transport, connectTimeout).pipe(
+      return yield* connectTransport(key, transport, connectTimeout, key === "mux").pipe(
         Effect.map((client): { client: MCPClient | undefined; status: Status } => ({
           client,
           status: { status: "connected" },
@@ -687,6 +735,35 @@ const layer = Layer.effect(
       return result
     })
 
+    const callTool = Effect.fn("MCP.callTool")(function* (input: {
+      tool: McpTool
+      arguments: unknown
+      sessionID: string
+      signal?: AbortSignal
+    }) {
+      const secure = secureInputClients.has(input.tool.client)
+      const token = secure ? crypto.randomUUID() : undefined
+      if (token) pendingSecureInput.set(token, { sessionID: input.sessionID })
+      return yield* Effect.tryPromise({
+        try: () =>
+          McpCatalog.callTool(
+            input.tool.def,
+            input.tool.client,
+            input.arguments,
+            { abortSignal: input.signal },
+            secure ? Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT) : input.tool.timeout,
+            token,
+          ),
+        catch: (error) => error,
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (token) pendingSecureInput.delete(token)
+          }),
+        ),
+      )
+    })
+
     function collectFromConnected<T extends { name: string }>(
       s: State,
       listFn: (c: Client, timeout?: number) => Promise<T[]>,
@@ -974,6 +1051,7 @@ const layer = Layer.effect(
       clients,
       instructions,
       tools,
+      callTool,
       prompts,
       resources,
       resourceTemplates,
@@ -998,7 +1076,7 @@ export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node],
+  deps: [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node, SecureInputV2.node],
 })
 
 export * as MCP from "."

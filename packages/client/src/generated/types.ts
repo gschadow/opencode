@@ -94,6 +94,14 @@ export type QuestionNotFoundError = {
 export const isQuestionNotFoundError = (value: unknown): value is QuestionNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "QuestionNotFoundError"
 
+export type SecureInputNotFoundError = {
+  readonly _tag: "SecureInputNotFoundError"
+  readonly requestID: string
+  readonly message: string
+}
+export const isSecureInputNotFoundError = (value: unknown): value is SecureInputNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "SecureInputNotFoundError"
+
 export type ProjectCopyError = {
   readonly name: "ProjectCopyError"
   readonly data: { readonly message: string; readonly forceRequired?: boolean | undefined }
@@ -2744,6 +2752,52 @@ export type QuestionsRejectInput = {
 }
 
 export type QuestionsRejectOutput = void
+
+export type ServerSecureInputListAllInput = {
+  readonly location?: {
+    readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  }["location"]
+}
+
+export type ServerSecureInputListAllOutput = {
+  readonly location: {
+    readonly directory: string
+    readonly workspaceID?: string
+    readonly project: { readonly id: string; readonly directory: string }
+  }
+  readonly data: ReadonlyArray<{
+    readonly id: string
+    readonly sessionID: string
+    readonly sessionName: string
+    readonly prompt: string
+  }>
+}
+
+export type ServerSecureInputListInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type ServerSecureInputListOutput = {
+  readonly data: ReadonlyArray<{
+    readonly id: string
+    readonly sessionID: string
+    readonly sessionName: string
+    readonly prompt: string
+  }>
+}["data"]
+
+export type ServerSecureInputReplyInput = {
+  readonly sessionID: { readonly sessionID: string; readonly requestID: string }["sessionID"]
+  readonly requestID: { readonly sessionID: string; readonly requestID: string }["requestID"]
+  readonly value: { readonly value: string }["value"]
+}
+
+export type ServerSecureInputReplyOutput = void
+
+export type ServerSecureInputRejectInput = {
+  readonly sessionID: { readonly sessionID: string; readonly requestID: string }["sessionID"]
+  readonly requestID: { readonly sessionID: string; readonly requestID: string }["requestID"]
+}
+
+export type ServerSecureInputRejectOutput = void
 
 export type ReferencesListInput = {
   readonly location?: {

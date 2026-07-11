@@ -389,8 +389,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
     const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
-    const execute = item.execute
-    if (!execute) continue
+    if (!item.execute) continue
 
     const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
     const transformed = ProviderTransform.schema(input.model, { ...schema, properties: schema.properties ?? {} })
@@ -404,9 +403,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
             { args },
           )
-          const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
+          const result: Awaited<ReturnType<NonNullable<typeof item.execute>>> = yield* Effect.gen(function* () {
             yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-            return yield* Effect.promise(() => execute(args, opts))
+            return yield* mcp.callTool({
+              tool: entry,
+              arguments: args,
+              sessionID: ctx.sessionID,
+              signal: opts.abortSignal,
+            })
           }).pipe(
             Effect.withSpan("Tool.execute", {
               attributes: {

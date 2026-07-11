@@ -67,6 +67,9 @@ export type Event =
   | EventQuestionV2Asked
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
+  | EventSecureInputAsked
+  | EventSecureInputReplied
+  | EventSecureInputRejected
   | EventTodoUpdated
   | EventLspUpdated
   | EventPermissionAsked
@@ -1353,6 +1356,32 @@ export type GlobalEvent = {
     | {
         id: string
         type: "question.v2.rejected"
+        properties: {
+          sessionID: string
+          requestID: string
+        }
+      }
+    | {
+        id: string
+        type: "secure.input.asked"
+        properties: {
+          id: string
+          sessionID: string
+          sessionName: string
+          prompt: string
+        }
+      }
+    | {
+        id: string
+        type: "secure.input.replied"
+        properties: {
+          sessionID: string
+          requestID: string
+        }
+      }
+    | {
+        id: string
+        type: "secure.input.rejected"
         properties: {
           sessionID: string
           requestID: string
@@ -2910,6 +2939,9 @@ export type V2Event =
   | QuestionV2Asked
   | QuestionV2Replied
   | QuestionV2Rejected
+  | SecureInputAsked
+  | SecureInputReplied
+  | SecureInputRejected
   | TodoUpdated
   | LspUpdated
   | PermissionAsked
@@ -2941,6 +2973,12 @@ export type V2EventStream = string
 
 export type ForbiddenError = {
   _tag: "ForbiddenError"
+  message: string
+}
+
+export type SecureInputNotFoundError = {
+  _tag: "SecureInputNotFoundError"
+  requestID: string
   message: string
 }
 
@@ -5653,6 +5691,62 @@ export type QuestionV2Rejected = {
   }
 }
 
+export type SecureInputAsked = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "secure.input.asked"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    id: string
+    sessionID: string
+    sessionName: string
+    prompt: string
+  }
+}
+
+export type SecureInputReplied = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "secure.input.replied"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    requestID: string
+  }
+}
+
+export type SecureInputRejected = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "secure.input.rejected"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    requestID: string
+  }
+}
+
 export type TodoUpdated = {
   id: string
   metadata?: {
@@ -6115,6 +6209,17 @@ export type QuestionV2Reply = {
    * User answers in order of questions (each answer is an array of selected labels)
    */
   answers: Array<QuestionV2Answer>
+}
+
+export type SecureInputRequest = {
+  id: string
+  sessionID: string
+  sessionName: string
+  prompt: string
+}
+
+export type SecureInputReply = {
+  value: string
 }
 
 export type ReferenceLocalSource = {
@@ -6828,6 +6933,35 @@ export type EventQuestionV2Replied = {
 export type EventQuestionV2Rejected = {
   id: string
   type: "question.v2.rejected"
+  properties: {
+    sessionID: string
+    requestID: string
+  }
+}
+
+export type EventSecureInputAsked = {
+  id: string
+  type: "secure.input.asked"
+  properties: {
+    id: string
+    sessionID: string
+    sessionName: string
+    prompt: string
+  }
+}
+
+export type EventSecureInputReplied = {
+  id: string
+  type: "secure.input.replied"
+  properties: {
+    sessionID: string
+    requestID: string
+  }
+}
+
+export type EventSecureInputRejected = {
+  id: string
+  type: "secure.input.rejected"
   properties: {
     sessionID: string
     requestID: string
@@ -13439,6 +13573,156 @@ export type V2SessionQuestionRejectResponses = {
 }
 
 export type V2SessionQuestionRejectResponse = V2SessionQuestionRejectResponses[keyof V2SessionQuestionRejectResponses]
+
+export type V2SecureInputRequestListData = {
+  body?: never
+  path?: never
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/secure-input/request"
+}
+
+export type V2SecureInputRequestListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2SecureInputRequestListError = V2SecureInputRequestListErrors[keyof V2SecureInputRequestListErrors]
+
+export type V2SecureInputRequestListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: Array<SecureInputRequest>
+  }
+}
+
+export type V2SecureInputRequestListResponse =
+  V2SecureInputRequestListResponses[keyof V2SecureInputRequestListResponses]
+
+export type V2SessionSecureInputListData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/secure-input"
+}
+
+export type V2SessionSecureInputListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type V2SessionSecureInputListError = V2SessionSecureInputListErrors[keyof V2SessionSecureInputListErrors]
+
+export type V2SessionSecureInputListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: Array<SecureInputRequest>
+  }
+}
+
+export type V2SessionSecureInputListResponse =
+  V2SessionSecureInputListResponses[keyof V2SessionSecureInputListResponses]
+
+export type V2SessionSecureInputReplyData = {
+  body: SecureInputReply
+  path: {
+    sessionID: string
+    requestID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/secure-input/{requestID}/reply"
+}
+
+export type V2SessionSecureInputReplyErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError | SecureInputNotFoundError
+   */
+  404: SecureInputNotFoundError | SessionNotFoundError
+}
+
+export type V2SessionSecureInputReplyError = V2SessionSecureInputReplyErrors[keyof V2SessionSecureInputReplyErrors]
+
+export type V2SessionSecureInputReplyResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2SessionSecureInputReplyResponse =
+  V2SessionSecureInputReplyResponses[keyof V2SessionSecureInputReplyResponses]
+
+export type V2SessionSecureInputRejectData = {
+  body?: never
+  path: {
+    sessionID: string
+    requestID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/secure-input/{requestID}/reject"
+}
+
+export type V2SessionSecureInputRejectErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError | SecureInputNotFoundError
+   */
+  404: SecureInputNotFoundError | SessionNotFoundError
+}
+
+export type V2SessionSecureInputRejectError = V2SessionSecureInputRejectErrors[keyof V2SessionSecureInputRejectErrors]
+
+export type V2SessionSecureInputRejectResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2SessionSecureInputRejectResponse =
+  V2SessionSecureInputRejectResponses[keyof V2SessionSecureInputRejectResponses]
 
 export type V2ReferenceListData = {
   body?: never

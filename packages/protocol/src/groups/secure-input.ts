@@ -17,7 +17,7 @@ export const makeSecureInputGroup = <
 ) =>
   HttpApiGroup.make("server.secure-input")
     .add(
-      HttpApiEndpoint.get("secure.input.request.list", "/api/secure-input/request", {
+      HttpApiEndpoint.get("secure.input.request.listAll", "/api/secure-input/request", {
         query: LocationQuery,
         success: Location.response(Schema.Array(SecureInput.Request)),
       })
