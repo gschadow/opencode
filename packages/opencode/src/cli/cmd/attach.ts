@@ -5,14 +5,14 @@ import { validateSession } from "../tui/validate-session"
 import { ServerAuth } from "@/server/auth"
 
 export const AttachCommand = cmd({
-  command: "attach <url>",
+  command: "attach [url]",
   describe: "attach to a running opencode server",
   builder: (yargs) =>
     yargs
       .positional("url", {
         type: "string",
         describe: "http://localhost:4096",
-        demandOption: true,
+        demandOption: false,
       })
       .option("dir", {
         type: "string",
@@ -60,6 +60,8 @@ export const AttachCommand = cmd({
         describe: "cap visible mini replay to the newest N messages",
       }),
   handler: async (args) => {
+    if (!args.url) args.url = "http://localhost:4096"
+
     if (args.replay === true) {
       UI.error("--replay is not supported; replay is enabled by default")
       process.exitCode = 1
@@ -68,7 +70,12 @@ export const AttachCommand = cmd({
     const noReplay = args.replay === false || args.noReplay === true
 
     const directory = (() => {
-      if (!args.dir) return undefined
+      if (!args.dir) {
+        // No explicit --dir: use the client's cwd so a new session lands in the
+        // right project directory.  For -s/--session, the server overrides this
+        // with the session's stored directory anyway, so it's harmless.
+        return process.cwd()
+      }
       try {
         process.chdir(args.dir)
         return process.cwd()

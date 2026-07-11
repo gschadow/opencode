@@ -45,13 +45,15 @@ export function path() {
     if (Flag.OPENCODE_DB === ":memory:" || isAbsolute(Flag.OPENCODE_DB)) return Flag.OPENCODE_DB
     return join(Global.Path.data, Flag.OPENCODE_DB)
   }
+  // Default to the stable production DB name. Channel-specific naming
+  // (opencode-dev.db, opencode-beta.db, …) requires explicit opt-in via
+  // OPENCODE_ENABLE_CHANNEL_DB=1 so dev builds never silently hide sessions.
   if (
-    ["latest", "beta", "prod"].includes(InstallationChannel) ||
-    process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
-    process.env.OPENCODE_DISABLE_CHANNEL_DB === "true"
+    process.env.OPENCODE_ENABLE_CHANNEL_DB === "1" ||
+    process.env.OPENCODE_ENABLE_CHANNEL_DB === "true"
   )
-    return join(Global.Path.data, "opencode.db")
-  return join(Global.Path.data, `opencode-${InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
+    return join(Global.Path.data, `opencode-${InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
+  return join(Global.Path.data, "opencode.db")
 }
 
 export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })

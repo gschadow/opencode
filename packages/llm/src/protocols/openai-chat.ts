@@ -421,7 +421,13 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
 
     if (delta?.content) {
       lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0")
-      lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", delta.content)
+      // Some providers (e.g. Ollama with Qwen3) leave residual think-tag closing
+      // markers at the start of the text content when the model uses inline
+      // think blocks (..., ..., <think>...</think>).  Strip these so the
+      // downstream pipeline receives clean text parts.
+      const cleaned = delta.content
+        .replace(/^\s*(?:\.{3,}|<think>[\s\S]*?<\/think>|[).?!:,]+\s*)+/, "")
+      lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", cleaned)
     }
 
     if (toolDeltas.length) lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0")

@@ -551,6 +551,7 @@ const layer: Layer.Layer<
         projectID: ctx.project.id,
         experimentalWorkspaces: flags.experimentalWorkspaces,
         ...input,
+        directory: input?.directory ?? ctx.directory,
       })
     })
 
