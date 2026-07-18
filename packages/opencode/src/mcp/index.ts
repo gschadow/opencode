@@ -739,9 +739,7 @@ const layer = Layer.effect(
       if (!secure || typeof args !== "object" || args === null) return args
       const obj = args as Record<string, unknown>
       if (typeof obj.name !== "string") return args
-      const suffix = "_" + sessionID.slice(-8).replace(/[^a-zA-Z0-9]/g, "")
-      if (obj.name.endsWith(suffix)) return args
-      return { ...obj, name: obj.name + suffix }
+      return { ...obj, name: sessionID + ":" + obj.name }
     }
 
     const callTool = Effect.fn("MCP.callTool")(function* (input: {
@@ -763,6 +761,7 @@ const layer = Layer.effect(
             { abortSignal: input.signal },
             secure ? Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT) : input.tool.timeout,
             token,
+            secure ? input.sessionID : undefined,
           ),
         catch: (error) => error,
       }).pipe(

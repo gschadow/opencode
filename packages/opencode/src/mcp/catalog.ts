@@ -61,14 +61,16 @@ export async function callTool(
   options: Pick<ToolExecutionOptions, "abortSignal">,
   timeout?: number,
   secureInputToken?: string,
+  sessionID?: string,
 ) {
+  const meta: Record<string, unknown> = {}
+  if (secureInputToken) meta["opencode.dev/secure-input-token"] = secureInputToken
+  if (sessionID) meta["opencode.dev/session-id"] = sessionID
   const result = await client.callTool(
     {
       name: mcpTool.name,
       arguments: (args || {}) as Record<string, unknown>,
-      ...(secureInputToken
-        ? { _meta: { "opencode.dev/secure-input-token": secureInputToken } }
-        : {}),
+      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
     },
     CallToolResultSchema,
     {
