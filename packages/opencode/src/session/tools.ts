@@ -473,7 +473,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           }
 
           const output = {
-            title: "",
+            title: key,
             metadata,
             output: truncated.content,
             attachments: attachments.map((attachment) => ({
