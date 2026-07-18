@@ -735,6 +735,15 @@ const layer = Layer.effect(
       return result
     })
 
+    const scopeMuxArgs = (toolName: string, args: unknown, sessionID: string, secure: boolean) => {
+      if (!secure || typeof args !== "object" || args === null) return args
+      const obj = args as Record<string, unknown>
+      if (typeof obj.name !== "string") return args
+      const suffix = "_" + sessionID.slice(-8).replace(/[^a-zA-Z0-9]/g, "")
+      if (obj.name.endsWith(suffix)) return args
+      return { ...obj, name: obj.name + suffix }
+    }
+
     const callTool = Effect.fn("MCP.callTool")(function* (input: {
       tool: McpTool
       arguments: unknown
@@ -744,12 +753,13 @@ const layer = Layer.effect(
       const secure = secureInputClients.has(input.tool.client)
       const token = secure ? crypto.randomUUID() : undefined
       if (token) pendingSecureInput.set(token, { sessionID: input.sessionID })
+      const args = scopeMuxArgs(input.tool.def.name, input.arguments, input.sessionID, secure)
       return yield* Effect.tryPromise({
         try: () =>
           McpCatalog.callTool(
             input.tool.def,
             input.tool.client,
-            input.arguments,
+            args,
             { abortSignal: input.signal },
             secure ? Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT) : input.tool.timeout,
             token,
