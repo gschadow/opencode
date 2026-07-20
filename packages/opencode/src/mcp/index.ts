@@ -753,8 +753,8 @@ const layer = Layer.effect(
       if (token) pendingSecureInput.set(token, { sessionID: input.sessionID })
       const args = scopeMuxArgs(input.tool.def.name, input.arguments, input.sessionID, secure)
       return yield* Effect.tryPromise({
-        try: () =>
-          McpCatalog.callTool(
+        try: async () => {
+          const result = await McpCatalog.callTool(
             input.tool.def,
             input.tool.client,
             args,
@@ -762,7 +762,15 @@ const layer = Layer.effect(
             secure ? Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT) : input.tool.timeout,
             token,
             secure ? input.sessionID : undefined,
-          ),
+          )
+          if (secure) {
+            const prefix = input.sessionID + ":"
+            for (const item of result.content) {
+              if (item.type === "text") item.text = item.text.replaceAll(prefix, "")
+            }
+          }
+          return result
+        },
         catch: (error) => error,
       }).pipe(
         Effect.ensuring(
