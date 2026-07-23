@@ -405,7 +405,7 @@ const layer = Layer.effect(
       })
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
-      return yield* connectTransport(key, transport, connectTimeout, key === "mux").pipe(
+      return yield* connectTransport(key, transport, connectTimeout, true).pipe(
         Effect.map((client): { client: MCPClient | undefined; status: Status } => ({
           client,
           status: { status: "connected" },
@@ -748,10 +748,9 @@ const layer = Layer.effect(
       sessionID: string
       signal?: AbortSignal
     }) {
-      const secure = secureInputClients.has(input.tool.client)
-      const token = secure ? crypto.randomUUID() : undefined
+      const token = crypto.randomUUID()
       if (token) pendingSecureInput.set(token, { sessionID: input.sessionID })
-      const args = scopeMuxArgs(input.tool.def.name, input.arguments, input.sessionID, secure)
+      const args = scopeMuxArgs(input.tool.def.name, input.arguments, input.sessionID, true)
       return yield* Effect.tryPromise({
         try: async () => {
           const result = await McpCatalog.callTool(
@@ -759,15 +758,13 @@ const layer = Layer.effect(
             input.tool.client,
             args,
             { abortSignal: input.signal },
-            secure ? Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT) : input.tool.timeout,
+            Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT),
             token,
-            secure ? input.sessionID : undefined,
+            input.sessionID,
           )
-          if (secure) {
-            const prefix = input.sessionID + ":"
-            for (const item of result.content) {
-              if (item.type === "text") item.text = item.text.replaceAll(prefix, "")
-            }
+          const prefix = input.sessionID + ":"
+          for (const item of result.content) {
+            if (item.type === "text") item.text = item.text.replaceAll(prefix, "")
           }
           return result
         },
