@@ -1359,29 +1359,44 @@ const layer = Layer.effect(
             let exactSig = ""
             let targetSig = ""
             if (toolParts.length > 0) {
+              // Check if any tool is exempt from loop detection
+              const exemptPattern = cfg.budget?.loopDetectionExemptTools
+              const exemptRegex = exemptPattern ? new RegExp(exemptPattern) : null
+              const isExempt = exemptRegex ? toolParts.some((p) => exemptRegex.test(p.tool)) : false
+              
               // Exact signature: all arguments
-              const exactSigs = toolParts.map((p) => {
-                const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
-                const args = Object.entries(input)
-                  .filter(([, v]) => v !== undefined && v !== null && v !== "")
-                  .map(([k, v]) => `${k}:${typeof v === "string" ? v.slice(0, 80) : String(v)}`)
-                  .sort()
-                  .join(",")
-                return `${p.tool}(${args})`
-              })
+              const exactSigs = toolParts
+                .filter((p) => !exemptRegex || !exemptRegex.test(p.tool))
+                .map((p) => {
+                  const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
+                  const args = Object.entries(input)
+                    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+                    .map(([k, v]) => `${k}:${typeof v === "string" ? v.slice(0, 80) : String(v)}`)
+                    .sort()
+                    .join(",")
+                  return `${p.tool}(${args})`
+                })
               exactSig = exactSigs.length === 1 ? exactSigs[0] : exactSigs.slice().sort().join("+")
               
               // Target signature: tool + primary target (file/command/query)
-              const targetSigs = toolParts.map((p) => {
-                const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
-                let target = ""
-                if (input.filePath) target = String(input.filePath)
-                else if (input.command) target = String(input.command).split(/\s+/)[0] // first word only
-                else if (input.query) target = String(input.query).slice(0, 40)
-                else if (input.pattern) target = String(input.pattern).slice(0, 40)
-                return `${p.tool}(${target})`
-              })
+              const targetSigs = toolParts
+                .filter((p) => !exemptRegex || !exemptRegex.test(p.tool))
+                .map((p) => {
+                  const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
+                  let target = ""
+                  if (input.filePath) target = String(input.filePath)
+                  else if (input.command) target = String(input.command).split(/\s+/)[0] // first word only
+                  else if (input.query) target = String(input.query).slice(0, 40)
+                  else if (input.pattern) target = String(input.pattern).slice(0, 40)
+                  return `${p.tool}(${target})`
+                })
               targetSig = targetSigs.length === 1 ? targetSigs[0] : targetSigs.slice().sort().join("+")
+              
+              // If all tools are exempt, skip loop detection for this step
+              if (isExempt && exactSigs.length === 0) {
+                exactSig = ""
+                targetSig = ""
+              }
             } else if (textParts.length > 0) {
               const text = textParts.map((p) => p.text).join(" ").slice(0, 100)
               exactSig = `text:${text}`

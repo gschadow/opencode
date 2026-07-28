@@ -174,6 +174,9 @@ export const Info = Schema.Struct({
       loopDetectionThreshold: Schema.optional(PositiveInt).annotate({
         description: "Number of identical tool-call repetitions before loop detection triggers (default: 3)",
       }),
+      loopDetectionExemptTools: Schema.optional(Schema.String).annotate({
+        description: "Regex pattern for tool names exempt from loop detection (e.g., '^(mux_read|mux_wait)$')",
+      }),
     }),
   ),
   experimental: Schema.optional(

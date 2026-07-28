@@ -10,4 +10,7 @@ export class Info extends Schema.Class<Info>("ConfigV2.Budget")({
   loopDetectionThreshold: PositiveInt.pipe(Schema.optional).annotate({
     description: "Number of identical tool-call repetitions before loop detection triggers (default: 3)",
   }),
+  loopDetectionExemptTools: Schema.String.pipe(Schema.optional).annotate({
+    description: "Regex pattern for tool names exempt from loop detection",
+  }),
 }) {}
