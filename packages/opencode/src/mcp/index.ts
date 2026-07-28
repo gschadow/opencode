@@ -765,11 +765,9 @@ const layer = Layer.effect(
       return yield* Effect.tryPromise({
         try: () =>
           McpCatalog.callTool(
-            input.tool.def,
-            input.tool.client,
-            input.arguments,
-            { abortSignal: input.signal },
-            Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT),
+            { ...input.tool, timeout: Math.max(input.tool.timeout ?? DEFAULT_TIMEOUT, SECURE_INPUT_TIMEOUT) },
+            (input.arguments || {}) as Record<string, unknown>,
+            input.signal,
             token,
           ),
         catch: (error) => error,

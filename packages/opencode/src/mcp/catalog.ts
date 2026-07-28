@@ -1,5 +1,4 @@
 import { Client, type CallToolResult, type Tool as MCPToolDef } from "@modelcontextprotocol/client"
-import { CallToolResultSchema } from "@modelcontextprotocol/client"
 import { dynamicTool, jsonSchema, type JSONSchema7, type Tool, type ToolExecutionOptions } from "ai"
 import { Effect } from "effect"
 
@@ -15,67 +14,20 @@ export async function callTool(
   tool: McpTool,
   args: Record<string, unknown>,
   signal?: AbortSignal,
+  secureInputToken?: string,
 ): Promise<CallToolResult> {
+  const meta: Record<string, unknown> = {}
+  if (secureInputToken) meta["opencode.dev/secure-input-token"] = secureInputToken
   const result = await tool.client.callTool(
-    { name: tool.def.name, arguments: args },
+    {
+      name: tool.def.name,
+      arguments: args,
+      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
+    },
     {
       resetTimeoutOnProgress: true,
       signal,
       timeout: tool.timeout,
-      // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
-      onprogress: () => {},
-    },
-  )
-  if (result.isError)
-    throw new Error(
-      result.content
-        .flatMap((item) => (item.type === "text" ? [item.text] : []))
-        .filter((text) => text.trim())
-        .join("\n\n") || "MCP tool returned an error",
-    )
-  return result
-}
-
-export function defs(client: Client, timeout?: number) {
-  return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
-}
-
-export function convertTool(tool: McpTool): Tool {
-  const inputSchema: JSONSchema7 = {
-    ...(tool.def.inputSchema as JSONSchema7),
-    type: "object",
-    properties: (tool.def.inputSchema.properties ?? {}) as JSONSchema7["properties"],
-    additionalProperties: false,
-  }
-
-  return dynamicTool({
-    description: tool.def.description ?? "",
-    inputSchema: jsonSchema(inputSchema),
-    execute: (args: unknown, options) => callTool(mcpTool, client, args, options, timeout),
-  })
-}
-
-export async function callTool(
-  mcpTool: MCPToolDef,
-  client: Client,
-  args: unknown,
-  options: Pick<ToolExecutionOptions, "abortSignal">,
-  timeout?: number,
-  secureInputToken?: string,
-) {
-  const meta: Record<string, unknown> = {}
-  if (secureInputToken) meta["opencode.dev/secure-input-token"] = secureInputToken
-  const result = await client.callTool(
-    {
-      name: mcpTool.name,
-      arguments: (args || {}) as Record<string, unknown>,
-      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
-    },
-    CallToolResultSchema,
-    {
-      resetTimeoutOnProgress: true,
-      signal: options.abortSignal,
-      timeout,
       // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
       onprogress: () => {},
     },
@@ -93,6 +45,33 @@ export async function callTool(
     ...result,
     content: [{ type: "text" as const, text: JSON.stringify(result.structuredContent) }],
   }
+}
+
+export function defs(client: Client, timeout?: number) {
+  return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
+}
+
+export function convertTool(tool: McpTool): Tool {
+  const inputSchema: JSONSchema7 = {
+    ...(tool.def.inputSchema as JSONSchema7),
+    type: "object",
+    properties: (tool.def.inputSchema.properties ?? {}) as JSONSchema7["properties"],
+    additionalProperties: false,
+  }
+
+  return dynamicTool({
+    description: tool.def.description ?? "",
+    inputSchema: jsonSchema(inputSchema),
+    execute: async (args: unknown, options) => {
+      const result = await callTool(tool, (args || {}) as Record<string, unknown>, options.abortSignal)
+      if (result.content.length > 0 || result.structuredContent === undefined || result.structuredContent === null)
+        return result
+      return {
+        ...result,
+        content: [{ type: "text" as const, text: JSON.stringify(result.structuredContent) }],
+      }
+    },
+  })
 }
 
 export function fetch<T extends { name: string }>(
