@@ -152,6 +152,14 @@ This fork of `anomalyco/opencode` adds the following changes not present upstrea
   tools with their argument schemas. Server-side: `POST /session/:id/tool`
   executes via `MCP.callTool`; `GET /mcp/tools` returns all tool definitions.
 
+- **Session budget limits and loop detection** (`packages/core/src/config/budget.ts`,
+  `packages/core/src/session/runner/loop-detector.ts`,
+  `packages/core/src/session/runner/llm.ts`) —
+  Configurable `maxCost` (dollar limit) and `maxConsecutiveSteps` limits prevent
+  runaway agent loops. A sliding-window loop detector identifies repeating tool-call
+  patterns and terminates the turn with a diagnostic message. Permission and question
+  elicitation dialogs also have 5-minute timeouts to prevent hung prompts.
+
 - **Invert channel-DB opt-in** (`packages/core/src/database/database.ts`) —
   Upstream uses `opencode-dev.db` for dev builds. This fork always uses `opencode.db`;
   opt in to channel naming with `OPENCODE_ENABLE_CHANNEL_DB=1`.
