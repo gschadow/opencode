@@ -1,5 +1,5 @@
 import * as Tool from "./tool"
-import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js"
+import { type CallToolResult } from "@modelcontextprotocol/client"
 import { Cause, Effect, Schema } from "effect"
 import { CodeMode, Tool as SandboxTool, toolError } from "@opencode-ai/codemode"
 import { MCP } from "@/mcp"

@@ -3360,6 +3360,9 @@
                 "properties": {
                   "code": {
                     "type": "string"
+                  },
+                  "iss": {
+                    "type": "string"
                   }
                 },
                 "required": ["code"],
@@ -21262,6 +21265,10 @@
           },
           "default_agent": {
             "type": "string"
+          },
+          "subagent_depth": {
+            "type": "integer",
+            "minimum": 0
           },
           "username": {
             "type": "string"
