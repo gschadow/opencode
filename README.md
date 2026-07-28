@@ -143,6 +143,15 @@ This fork of `anomalyco/opencode` adds the following changes not present upstrea
   Affects `packages/core/src/secure-input.ts`, `packages/opencode/src/mcp/index.ts`,
   `packages/tui/src/component/dialog-secure-input.tsx`, and 20 other files.
 
+- **User-initiated MCP tool calls** (`packages/opencode/src/session/prompt.ts`,
+  `packages/opencode/src/server/routes/instance/httpapi/{groups,handlers}/{session,mcp}.ts`,
+  `packages/tui/src/component/{prompt/index.tsx,dialog-mcp-tools.tsx}`) —
+  Users can invoke MCP tools directly from the TUI without going through the
+  LLM. Press `!` to enter shell mode, then `!tool_name` (or `!tool_name {...}`
+  with JSON args). Press `?` for a scrollable tool browser showing all available
+  tools with their argument schemas. Server-side: `POST /session/:id/tool`
+  executes via `MCP.callTool`; `GET /mcp/tools` returns all tool definitions.
+
 - **Invert channel-DB opt-in** (`packages/core/src/database/database.ts`) —
   Upstream uses `opencode-dev.db` for dev builds. This fork always uses `opencode.db`;
   opt in to channel naming with `OPENCODE_ENABLE_CHANNEL_DB=1`.

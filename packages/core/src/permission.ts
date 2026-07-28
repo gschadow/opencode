@@ -205,7 +205,14 @@ const layer = Layer.effect(
           }
           if (result.effect === "allow") return
           const item = yield* create(request(input), input.agent)
-          return yield* restore(Deferred.await(item.deferred)).pipe(
+          return yield* restore(
+            Deferred.await(item.deferred).pipe(
+              EffectRuntime.timeoutOrElse({
+                duration: "5 minutes",
+                orElse: () => EffectRuntime.fail(new DeclinedError()),
+              }),
+            ),
+          ).pipe(
             EffectRuntime.catchTag("PermissionV2.DeclinedError", (error) => EffectRuntime.die(error)),
             EffectRuntime.ensuring(
               EffectRuntime.sync(() => {

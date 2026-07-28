@@ -427,7 +427,7 @@ const layer = Layer.effect(
           step = result.step + 1
           promotion = "steer"
           if (result.toolNames.length > 0) {
-            loopState = LoopDetector.record(loopState, result.toolNames)
+            loopState = LoopDetector.record(loopState, result.toolNames.join(","))
           } else {
             loopState = LoopDetector.reset(loopState)
           }
@@ -439,7 +439,7 @@ const layer = Layer.effect(
               break
             }
           }
-          if (needsContinuation && maxConsecutiveSteps !== undefined && LoopDetector.isLooping(loopState, maxConsecutiveSteps)) {
+          if (needsContinuation && maxConsecutiveSteps !== undefined && LoopDetector.detectLoop(loopState, maxConsecutiveSteps) !== undefined) {
             yield* runTurn(input.sessionID, undefined, step, "loop")
             needsContinuation = false
             break

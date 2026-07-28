@@ -160,8 +160,6 @@ async function buildTool() {
               input.arguments,
               { abortSignal: input.signal },
               input.tool.timeout,
-              undefined,
-              undefined,
             ),
           catch: (error) => error,
         }),
