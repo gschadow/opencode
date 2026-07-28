@@ -1314,7 +1314,7 @@ const layer = Layer.effect(
           const freshSession = yield* sessions.get(sessionID).pipe(Effect.orDie)
           const cfg = yield* config.get()
           const sessionBudget = (freshSession.metadata as Record<string, unknown> | undefined)?.budget as
-            | { maxCost?: number; maxConsecutiveSteps?: number }
+            | { maxCost?: number; loopDetectionThreshold?: number }
             | undefined
           const maxCost = sessionBudget?.maxCost ?? cfg.budget?.maxCost
           if (maxCost !== undefined && (freshSession.cost ?? 0) >= maxCost) {
@@ -1350,8 +1350,8 @@ const layer = Layer.effect(
             break
           }
 
-          const maxConsecutiveSteps = sessionBudget?.maxConsecutiveSteps ?? cfg.budget?.maxConsecutiveSteps
-          if (maxConsecutiveSteps !== undefined && step > 0) {
+          const loopDetectionThreshold = sessionBudget?.loopDetectionThreshold ?? cfg.budget?.loopDetectionThreshold
+          if (loopDetectionThreshold !== undefined && step > 0) {
             const lastAssistantParts = lastAssistantMsg?.parts ?? []
             const toolParts = lastAssistantParts.filter((p): p is SessionV1.ToolPart => p.type === "tool")
             const textParts = lastAssistantParts.filter((p): p is SessionV1.TextPart => p.type === "text")
@@ -1391,7 +1391,7 @@ const layer = Layer.effect(
             if (exactSig && targetSig) {
               // Exact match detector: warning after N, hard stop after 2N
               loopState = LoopDetector.record(loopState, exactSig)
-              const loopResult = LoopDetector.detectLoop(loopState, maxConsecutiveSteps)
+              const loopResult = LoopDetector.detectLoop(loopState, loopDetectionThreshold)
               
               if (loopResult) {
                 const patternDesc = loopResult.pattern.join(" → ")
@@ -1472,7 +1472,7 @@ const layer = Layer.effect(
             // but arguments vary (e.g., bash→edit→read on same file with different edit content)
             // Uses a higher threshold (5x) to avoid false positives on legitimate workflows
             targetLoopState = LoopDetector.record(targetLoopState, targetSig)
-            const targetResult = LoopDetector.detectLoop(targetLoopState, maxConsecutiveSteps * 5)
+            const targetResult = LoopDetector.detectLoop(targetLoopState, loopDetectionThreshold * 5)
             
             if (targetResult && !loopWarned) {
               const patternDesc = targetResult.pattern.join(" → ")

@@ -171,8 +171,8 @@ export const Info = Schema.Struct({
       maxCost: Schema.optional(Schema.Finite).annotate({
         description: "Maximum session cost in dollars before auto-stop (default: none)",
       }),
-      maxConsecutiveSteps: Schema.optional(PositiveInt).annotate({
-        description: "Maximum consecutive tool-loop steps without user input before stop",
+      loopDetectionThreshold: Schema.optional(PositiveInt).annotate({
+        description: "Number of identical tool-call repetitions before loop detection triggers (default: 3)",
       }),
     }),
   ),

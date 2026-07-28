@@ -410,10 +410,10 @@ const layer = Layer.effect(
         .get()
         .pipe(Effect.orDie)
       const sessionBudget = (sessionRow?.metadata as Record<string, unknown> | null)?.budget as
-        | { maxCost?: number; maxConsecutiveSteps?: number }
+        | { maxCost?: number; loopDetectionThreshold?: number }
         | undefined
       const maxCost = sessionBudget?.maxCost ?? budget?.maxCost
-      const maxConsecutiveSteps = sessionBudget?.maxConsecutiveSteps ?? budget?.maxConsecutiveSteps
+      const loopDetectionThreshold = sessionBudget?.loopDetectionThreshold ?? budget?.loopDetectionThreshold
       let loopState = LoopDetector.create()
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
       let shouldRun = input.force || hasSteer || hasQueue
@@ -439,7 +439,7 @@ const layer = Layer.effect(
               break
             }
           }
-          if (needsContinuation && maxConsecutiveSteps !== undefined && LoopDetector.detectLoop(loopState, maxConsecutiveSteps) !== undefined) {
+          if (needsContinuation && loopDetectionThreshold !== undefined && LoopDetector.detectLoop(loopState, loopDetectionThreshold) !== undefined) {
             yield* runTurn(input.sessionID, undefined, step, "loop")
             needsContinuation = false
             break
