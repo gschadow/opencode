@@ -1211,11 +1211,8 @@ const layer = Layer.effect(
         let step = 0
         let effectiveUser: SessionV1.User | undefined
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
-        let loopSignatures: string[] = []
-        let loopCounts = new Map<string, number>()
         let loopWarned = false
-        let strictLoopState = LoopDetector.create()
-        let looseLoopState = LoopDetector.create()
+        let loopState = LoopDetector.create()
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1358,41 +1355,35 @@ const layer = Layer.effect(
             const toolParts = lastAssistantParts.filter((p): p is SessionV1.ToolPart => p.type === "tool")
             const textParts = lastAssistantParts.filter((p): p is SessionV1.TextPart => p.type === "text")
             
-            let strictSig = ""
-            let looseSig = ""
+            let sig = ""
             if (toolParts.length > 0) {
-              const toolNames = toolParts.map((p) => p.tool)
-              looseSig = toolNames.length === 1 ? toolNames[0] : toolNames.slice().sort().join("+")
-              
               const toolSigs = toolParts.map((p) => {
                 const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
-                const keyArgs = [
-                  input.filePath,
-                  input.command,
-                  input.pattern,
-                  input.query,
-                ].filter(Boolean).join(",")
-                return `${p.tool}(${keyArgs})`
+                const args = Object.entries(input)
+                  .filter(([, v]) => v !== undefined && v !== null && v !== "")
+                  .map(([k, v]) => `${k}:${typeof v === "string" ? v.slice(0, 80) : String(v)}`)
+                  .sort()
+                  .join(",")
+                return `${p.tool}(${args})`
               })
-              strictSig = toolSigs.length === 1 ? toolSigs[0] : toolSigs.slice().sort().join("+")
+              sig = toolSigs.length === 1 ? toolSigs[0] : toolSigs.slice().sort().join("+")
             } else if (textParts.length > 0) {
               const text = textParts.map((p) => p.text).join(" ").slice(0, 100)
-              strictSig = `text:${text}`
-              looseSig = "text"
+              sig = `text:${text}`
             }
             
-            if (strictSig) {
-              strictLoopState = LoopDetector.record(strictLoopState, strictSig)
-              const strictResult = LoopDetector.detectLoop(strictLoopState, maxConsecutiveSteps)
+            if (sig) {
+              loopState = LoopDetector.record(loopState, sig)
+              const loopResult = LoopDetector.detectLoop(loopState, maxConsecutiveSteps)
               
-              if (strictResult) {
-                const patternDesc = strictResult.pattern.join(" → ")
+              if (loopResult) {
+                const patternDesc = loopResult.pattern.join(" → ")
                 if (loopWarned) {
-                  yield* Effect.logInfo("strict loop detected after warning, hard stopping", {
+                  yield* Effect.logInfo("loop detected after warning, hard stopping", {
                     "session.id": sessionID,
                     step,
                     pattern: patternDesc,
-                    repeats: strictResult.repeats,
+                    repeats: loopResult.repeats,
                   })
                   const loopMsg: SessionV1.Assistant = {
                     id: MessageID.ascending(),
@@ -1416,19 +1407,18 @@ const layer = Layer.effect(
                     messageID: loopMsg.id,
                     sessionID,
                     type: "text",
-                    text: `**Repetitive loop detected.** Pattern: ${patternDesc} (repeated ${strictResult.repeats} times). Stopping to prevent runaway costs.`,
+                    text: `**Repetitive loop detected.** Pattern: ${patternDesc} (repeated ${loopResult.repeats} times). Stopping to prevent runaway costs.`,
                   })
                   break
                 } else {
-                  yield* Effect.logInfo("strict loop detected, injecting reassessment warning", {
+                  yield* Effect.logInfo("loop detected, injecting reassessment warning", {
                     "session.id": sessionID,
                     step,
                     pattern: patternDesc,
-                    repeats: strictResult.repeats,
+                    repeats: loopResult.repeats,
                   })
                   loopWarned = true
-                  strictLoopState = LoopDetector.reset(strictLoopState)
-                  looseLoopState = LoopDetector.reset(looseLoopState)
+                  loopState = LoopDetector.reset(loopState)
                   const warnMsg: SessionV1.Assistant = {
                     id: MessageID.ascending(),
                     parentID: user.id,
@@ -1451,59 +1441,14 @@ const layer = Layer.effect(
                     messageID: warnMsg.id,
                     sessionID,
                     type: "text",
-                    text: `**Loop detection warning:** You appear to be repeating the exact same operations. Pattern: ${patternDesc} (repeated ${strictResult.repeats} times). Please step back and reassess your approach. Consider: Is there a different strategy? Are you stuck on the same error? What's the actual goal here?`,
+                    text: `**Loop detection warning:** You appear to be repeating the same operations. Pattern: ${patternDesc} (repeated ${loopResult.repeats} times). Please step back and reassess your approach. Consider: Is there a different strategy? Are you stuck on the same error? What's the actual goal here?`,
                   })
                   continue
                 }
               }
             } else {
-              strictLoopState = LoopDetector.reset(strictLoopState)
+              loopState = LoopDetector.reset(loopState)
               loopWarned = false
-            }
-            
-            if (looseSig) {
-              looseLoopState = LoopDetector.record(looseLoopState, looseSig)
-              const looseResult = LoopDetector.detectLoop(looseLoopState, maxConsecutiveSteps * 2)
-              
-              if (looseResult && !loopWarned) {
-                const patternDesc = looseResult.pattern.join(" → ")
-                yield* Effect.logInfo("loose loop detected, injecting reassessment warning", {
-                  "session.id": sessionID,
-                  step,
-                  pattern: patternDesc,
-                  repeats: looseResult.repeats,
-                })
-                loopWarned = true
-                strictLoopState = LoopDetector.reset(strictLoopState)
-                looseLoopState = LoopDetector.reset(looseLoopState)
-                const warnMsg: SessionV1.Assistant = {
-                  id: MessageID.ascending(),
-                  parentID: user.id,
-                  role: "assistant",
-                  mode: agent.name,
-                  agent: agent.name,
-                  variant: user.model.variant,
-                  path: { cwd: ctx.directory, root: ctx.worktree },
-                  cost: 0,
-                  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-                  modelID: model.id,
-                  providerID: model.providerID,
-                  time: { created: Date.now(), completed: Date.now() },
-                  finish: "tool-calls",
-                  sessionID,
-                }
-                yield* sessions.updateMessage(warnMsg)
-                yield* sessions.updatePart({
-                  id: PartID.ascending(),
-                  messageID: warnMsg.id,
-                  sessionID,
-                  type: "text",
-                  text: `**Loop detection warning:** You appear to be repeating a similar sequence of operations. Pattern: ${patternDesc} (repeated ${looseResult.repeats} times). Please step back and reassess your approach. Consider: Is there a different strategy? Are you making progress toward the goal?`,
-                })
-                continue
-              }
-            } else {
-              looseLoopState = LoopDetector.reset(looseLoopState)
             }
           }
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
