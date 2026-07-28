@@ -1213,6 +1213,7 @@ const layer = Layer.effect(
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
         let loopWarned = false
         let loopState = LoopDetector.create()
+        let targetLoopState = LoopDetector.create()
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1355,9 +1356,11 @@ const layer = Layer.effect(
             const toolParts = lastAssistantParts.filter((p): p is SessionV1.ToolPart => p.type === "tool")
             const textParts = lastAssistantParts.filter((p): p is SessionV1.TextPart => p.type === "text")
             
-            let sig = ""
+            let exactSig = ""
+            let targetSig = ""
             if (toolParts.length > 0) {
-              const toolSigs = toolParts.map((p) => {
+              // Exact signature: all arguments
+              const exactSigs = toolParts.map((p) => {
                 const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
                 const args = Object.entries(input)
                   .filter(([, v]) => v !== undefined && v !== null && v !== "")
@@ -1366,14 +1369,28 @@ const layer = Layer.effect(
                   .join(",")
                 return `${p.tool}(${args})`
               })
-              sig = toolSigs.length === 1 ? toolSigs[0] : toolSigs.slice().sort().join("+")
+              exactSig = exactSigs.length === 1 ? exactSigs[0] : exactSigs.slice().sort().join("+")
+              
+              // Target signature: tool + primary target (file/command/query)
+              const targetSigs = toolParts.map((p) => {
+                const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
+                let target = ""
+                if (input.filePath) target = String(input.filePath)
+                else if (input.command) target = String(input.command).split(/\s+/)[0] // first word only
+                else if (input.query) target = String(input.query).slice(0, 40)
+                else if (input.pattern) target = String(input.pattern).slice(0, 40)
+                return `${p.tool}(${target})`
+              })
+              targetSig = targetSigs.length === 1 ? targetSigs[0] : targetSigs.slice().sort().join("+")
             } else if (textParts.length > 0) {
               const text = textParts.map((p) => p.text).join(" ").slice(0, 100)
-              sig = `text:${text}`
+              exactSig = `text:${text}`
+              targetSig = "text"
             }
             
-            if (sig) {
-              loopState = LoopDetector.record(loopState, sig)
+            if (exactSig && targetSig) {
+              // Exact match detector: warning after N, hard stop after 2N
+              loopState = LoopDetector.record(loopState, exactSig)
               const loopResult = LoopDetector.detectLoop(loopState, maxConsecutiveSteps)
               
               if (loopResult) {
@@ -1449,6 +1466,50 @@ const layer = Layer.effect(
             } else {
               loopState = LoopDetector.reset(loopState)
               loopWarned = false
+            }
+            
+            // Target-aware detector: catches multi-step cycles where tools target the same files
+            // but arguments vary (e.g., bash→edit→read on same file with different edit content)
+            // Uses a higher threshold (5x) to avoid false positives on legitimate workflows
+            targetLoopState = LoopDetector.record(targetLoopState, targetSig)
+            const targetResult = LoopDetector.detectLoop(targetLoopState, maxConsecutiveSteps * 5)
+            
+            if (targetResult && !loopWarned) {
+              const patternDesc = targetResult.pattern.join(" → ")
+              yield* Effect.logInfo("target loop detected, injecting reassessment warning", {
+                "session.id": sessionID,
+                step,
+                pattern: patternDesc,
+                repeats: targetResult.repeats,
+              })
+              loopWarned = true
+              loopState = LoopDetector.reset(loopState)
+              targetLoopState = LoopDetector.reset(targetLoopState)
+              const warnMsg: SessionV1.Assistant = {
+                id: MessageID.ascending(),
+                parentID: user.id,
+                role: "assistant",
+                mode: agent.name,
+                agent: agent.name,
+                variant: user.model.variant,
+                path: { cwd: ctx.directory, root: ctx.worktree },
+                cost: 0,
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                modelID: model.id,
+                providerID: model.providerID,
+                time: { created: Date.now(), completed: Date.now() },
+                finish: "tool-calls",
+                sessionID,
+              }
+              yield* sessions.updateMessage(warnMsg)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: warnMsg.id,
+                sessionID,
+                type: "text",
+                text: `**Loop detection warning:** You appear to be repeating operations on the same target. Pattern: ${patternDesc} (repeated ${targetResult.repeats} times). Please step back and reassess your approach. Consider: Is there a different strategy? Are you stuck on the same error? What's the actual goal here?`,
+              })
+              continue
             }
           }
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
