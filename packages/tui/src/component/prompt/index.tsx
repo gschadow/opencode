@@ -272,9 +272,21 @@ export function Prompt(props: PromptProps) {
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = session?.cost ?? 0
+    const sessionBudget = (session?.metadata as Record<string, unknown> | undefined)?.budget as
+      | { maxCost?: number }
+      | undefined
+    const configBudget = (sync.data.config as Record<string, unknown>)?.budget as
+      | { maxCost?: number }
+      | undefined
+    const limit = sessionBudget?.maxCost ?? configBudget?.maxCost
+    const costDisplay = cost > 0
+      ? limit !== undefined
+        ? `${money.format(cost)} / ${money.format(limit)}`
+        : money.format(cost)
+      : undefined
     return {
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
-      cost: cost > 0 ? money.format(cost) : undefined,
+      cost: costDisplay,
     }
   })
 
@@ -1055,16 +1067,122 @@ export function Prompt(props: PromptProps) {
 
     if (store.mode === "shell") {
       move.startSubmit()
-      void sdk.client.session.shell({
-        sessionID,
-        agent: agent.name,
-        model: {
-          providerID: selectedModel.providerID,
-          modelID: selectedModel.modelID,
-        },
-        command: inputText,
-      })
+      if (inputText === "?") {
+        toast.show({
+          variant: "info",
+          message: "MCP tool mode:\n!!tool_name — call tool with no args\n!!tool_name {json} — call with JSON args\n!!tool_name \"string\" — call with string arg",
+          duration: 5000,
+        })
+      } else if (inputText.startsWith("!")) {
+        const toolInput = inputText.slice(1).trim()
+        const spaceIndex = toolInput.indexOf(" ")
+        const toolName = spaceIndex === -1 ? toolInput : toolInput.slice(0, spaceIndex)
+        const argsText = spaceIndex === -1 ? "" : toolInput.slice(spaceIndex + 1).trim()
+        let args: unknown = {}
+        if (argsText) {
+          try {
+            args = JSON.parse(argsText)
+          } catch {
+            toast.show({
+              variant: "error",
+              message: `Invalid JSON arguments: ${argsText}`,
+              duration: 3000,
+            })
+            setStore("mode", "normal")
+            return false
+          }
+        }
+        void sdk.client.session
+          .mcpTool({
+            sessionID,
+            agent: agent.name,
+            model: {
+              providerID: selectedModel.providerID,
+              modelID: selectedModel.modelID,
+            },
+            tool: toolName,
+            arguments: args,
+          })
+          .catch((error) => {
+            toast.show({
+              variant: "error",
+              message: `Tool call failed: ${errorMessage(error)}`,
+              duration: 3000,
+            })
+          })
+      } else {
+        void sdk.client.session.shell({
+          sessionID,
+          agent: agent.name,
+          model: {
+            providerID: selectedModel.providerID,
+            modelID: selectedModel.modelID,
+          },
+          command: inputText,
+        })
+      }
       setStore("mode", "normal")
+    } else if (inputText.startsWith("/costlimit")) {
+      const parts = inputText.split(/\s+/)
+      const value = parts[1]
+      if (!value) {
+        const current = (sync.session.get(sessionID)?.metadata as Record<string, unknown> | undefined)?.budget as
+          | { maxCost?: number }
+          | undefined
+        const limit = current?.maxCost
+        toast.show({
+          message: limit !== undefined ? `Current spending limit: $${limit}` : "No spending limit set. Usage: /costlimit <amount>",
+          variant: "info",
+        })
+      } else {
+        const amount = Number.parseFloat(value)
+        if (Number.isNaN(amount) || amount < 0) {
+          toast.show({ message: "Invalid amount. Usage: /costlimit <number>", variant: "error" })
+        } else {
+          const existing = (sync.session.get(sessionID)?.metadata as Record<string, unknown> | undefined) ?? {}
+          void sdk.client.session
+            .update({
+              sessionID,
+              metadata: { ...existing, budget: { ...(existing.budget as Record<string, unknown> | undefined), maxCost: amount } },
+            })
+            .then(() => toast.show({ message: `Spending limit set to $${amount}`, variant: "success" }))
+            .catch((error) => {
+              toast.show({
+                message: error instanceof Error ? error.message : "Failed to set spending limit",
+                variant: "error",
+              })
+            })
+        }
+      }
+    } else if (inputText.startsWith("/btw ")) {
+      move.startSubmit()
+      const btwText = "BTW: " + inputText.slice(5)
+      const btwParts = [
+        ...editorParts,
+        {
+          type: "text" as const,
+          text: btwText,
+        },
+        ...nonTextParts,
+      ]
+      void sdk.client.session.prompt(
+        {
+          sessionID,
+          ...selectedModel,
+          agent: agent.name,
+          model: selectedModel,
+          variant,
+          parts: btwParts,
+          noReply: true,
+        },
+        { throwOnError: true },
+      )
+      toast.show({
+        variant: "info",
+        message: `BTW: ${inputText.slice(5)}`,
+        duration: 2000,
+      })
+      if (editorParts.length > 0) editor.markSelectionSent()
     } else if (
       inputText.startsWith("/") &&
       sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))

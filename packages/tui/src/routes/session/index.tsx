@@ -1130,6 +1130,26 @@ export function Session() {
         moveChild(-1)
       }),
     },
+    {
+      title: "Set spending limit",
+      value: "session.budget.costlimit",
+      category: "Session",
+      description: "Set or view the spending limit for this session (use /costlimit <amount> in prompt)",
+      slash: {
+        name: "costlimit",
+      },
+      run: () => {
+        const current = (session()?.metadata as Record<string, unknown> | undefined)?.budget as
+          | { maxCost?: number }
+          | undefined
+        const limit = current?.maxCost
+        toast.show({
+          message: limit !== undefined ? `Current spending limit: $${limit}. Type /costlimit <amount> to change.` : "No spending limit set. Type /costlimit <amount> in the prompt to set one.",
+          variant: "info",
+        })
+        dialog.clear()
+      },
+    },
   ])
 
   const sessionCommands = createMemo(() =>
@@ -1423,7 +1443,8 @@ function UserMessage(props: {
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
   const queued = createMemo(() => props.pending && props.message.id > props.pending)
-  const color = createMemo(() => local.agent.color(props.message.agent))
+  const isBtw = createMemo(() => text().startsWith("BTW: "))
+  const color = createMemo(() => isBtw() ? theme.textMuted : local.agent.color(props.message.agent))
   const queuedFg = createMemo(() => selectedForeground(theme, color()))
   const metadataVisible = createMemo(() => queued() || ctx.showTimestamps())
 
@@ -1454,7 +1475,7 @@ function UserMessage(props: {
             backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
             flexShrink={0}
           >
-            <text fg={theme.text}>{text()}</text>
+            <text fg={isBtw() ? theme.textMuted : theme.text}>{text()}</text>
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>

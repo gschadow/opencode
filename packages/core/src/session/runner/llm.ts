@@ -8,6 +8,7 @@ import {
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
+import { eq } from "drizzle-orm"
 import { Cause, DateTime, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
 import { AgentV2 } from "../../agent"
 import { Config } from "../../config"
@@ -31,11 +32,14 @@ import { SessionHistory } from "../history"
 import { SessionInput } from "../input"
 import { SessionSchema } from "../schema"
 import { SessionStore } from "../store"
+import { SessionTable } from "../sql"
 import { type RunError, Service } from "./index"
 import { SessionRunnerModel } from "./model"
 import { createLLMEventPublisher } from "./publish-llm-event"
 import { toLLMMessages } from "./to-llm-message"
 import { MAX_STEPS_PROMPT } from "./max-steps"
+import { BUDGET_EXCEEDED_PROMPT, LOOP_DETECTED_PROMPT } from "./budget-stops"
+import * as LoopDetector from "./loop-detector"
 import { Snapshot } from "../../snapshot"
 import { makeLocationNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
@@ -170,11 +174,14 @@ const layer = Layer.effect(
         concurrency: "unbounded",
       }).pipe(Effect.map(SystemContext.combine))
 
+    type StopReason = "budget" | "loop"
+
     const runTurnAttempt = Effect.fn("SessionRunner.runTurn")(function* (
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
       recoverOverflow?: typeof compaction.compactAfterOverflow,
+      stopReason?: StopReason,
     ) {
       const session = yield* getSession(sessionID)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
@@ -184,6 +191,7 @@ const layer = Layer.effect(
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
+      const toolNames: string[] = []
       if (promotion) {
         const cutoff = yield* EventV2.latestSequence(db, session.id)
         let promoted = 0
@@ -200,7 +208,9 @@ const layer = Layer.effect(
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
-      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
+      const isStop = isLastStep || stopReason !== undefined
+      const stopPrompt = stopReason === "budget" ? BUDGET_EXCEEDED_PROMPT : stopReason === "loop" ? LOOP_DETECTED_PROMPT : MAX_STEPS_PROMPT
+      const toolMaterialization = isStop ? undefined : yield* tools.materialize(agent.info?.permissions)
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const request = LLM.request({
         model,
@@ -208,9 +218,9 @@ const layer = Layer.effect(
         system: [agent.info?.system, system.baseline]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),
-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        messages: [...toLLMMessages(context, model), ...(isStop ? [Message.assistant(stopPrompt)] : [])],
         tools: toolMaterialization?.definitions ?? [],
-        toolChoice: isLastStep ? "none" : undefined,
+        toolChoice: isStop ? "none" : undefined,
       })
       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
         return yield* Effect.die(continueAfterCompaction(currentStep))
@@ -241,8 +251,9 @@ const layer = Layer.effect(
             }
             yield* publish(event)
             if (event.type !== "tool-call" || event.providerExecuted) return
+            toolNames.push(event.name)
             if (!toolMaterialization) {
-              yield* withPublication(publisher.failUnsettledTools("Tools are disabled after the maximum agent steps"))
+              yield* withPublication(publisher.failUnsettledTools("Tools are disabled"))
               return
             }
             needsContinuation = true
@@ -342,39 +353,41 @@ const layer = Layer.effect(
           if (stream._tag === "Failure") return yield* Effect.failCause(stream.cause)
           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
             return yield* Effect.failCause(settled.cause)
-          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
+          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep, toolNames }
         }),
       )
     }, Effect.scoped)
+    type RunTurnResult = { readonly needsContinuation: boolean; readonly step: number; readonly toolNames: string[] }
     type RunTurn = (
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
-    ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
+      stopReason?: StopReason,
+    ) => Effect.Effect<RunTurnResult, RunError>
 
-    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step).pipe(
+    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, stopReason) {
+      return yield* runTurnAttempt(sessionID, promotion, step, undefined, stopReason).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
               return yield* Effect.die("Post-compaction provider attempt cannot recover another overflow")
             yield* Effect.yieldNow
-            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
+            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, stopReason)
           }),
         ),
       )
     })
 
-    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow).pipe(
+    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, stopReason) {
+      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow, stopReason).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             yield* Effect.yieldNow
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
-              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
-            return yield* runTurn(sessionID, undefined, defect.transition.step)
+              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, stopReason)
+            return yield* runTurn(sessionID, undefined, defect.transition.step, stopReason)
           }),
         ),
       )
@@ -388,16 +401,49 @@ const layer = Layer.effect(
       const hasQueue = hasSteer ? false : yield* SessionInput.hasPending(db, input.sessionID, "queue")
       if (!input.force && !hasSteer && !hasQueue) return
       yield* failInterruptedTools(input.sessionID)
+      const configEntries = yield* config.entries()
+      const budget = Config.latest(configEntries, "budget")
+      const sessionRow = yield* db
+        .select({ metadata: SessionTable.metadata })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, input.sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      const sessionBudget = (sessionRow?.metadata as Record<string, unknown> | null)?.budget as
+        | { maxCost?: number; maxConsecutiveSteps?: number }
+        | undefined
+      const maxCost = sessionBudget?.maxCost ?? budget?.maxCost
+      const maxConsecutiveSteps = sessionBudget?.maxConsecutiveSteps ?? budget?.maxConsecutiveSteps
+      let loopState = LoopDetector.create()
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
       let shouldRun = input.force || hasSteer || hasQueue
       while (shouldRun) {
         let needsContinuation = true
         let step = 1
+        loopState = LoopDetector.reset(loopState)
         while (needsContinuation) {
           const result = yield* runTurn(input.sessionID, promotion, step)
           needsContinuation = result.needsContinuation
           step = result.step + 1
           promotion = "steer"
+          if (result.toolNames.length > 0) {
+            loopState = LoopDetector.record(loopState, result.toolNames)
+          } else {
+            loopState = LoopDetector.reset(loopState)
+          }
+          if (needsContinuation && maxCost !== undefined) {
+            const session = yield* getSession(input.sessionID)
+            if (session.cost >= maxCost) {
+              yield* runTurn(input.sessionID, undefined, step, "budget")
+              needsContinuation = false
+              break
+            }
+          }
+          if (needsContinuation && maxConsecutiveSteps !== undefined && LoopDetector.isLooping(loopState, maxConsecutiveSteps)) {
+            yield* runTurn(input.sessionID, undefined, step, "loop")
+            needsContinuation = false
+            break
+          }
           if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
         }
         shouldRun = yield* SessionInput.hasPending(db, input.sessionID, "queue")

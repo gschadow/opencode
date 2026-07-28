@@ -163,6 +163,16 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  budget: Schema.optional(
+    Schema.Struct({
+      maxCost: Schema.optional(Schema.Finite).annotate({
+        description: "Maximum session cost in dollars before auto-stop (default: none)",
+      }),
+      maxConsecutiveSteps: Schema.optional(PositiveInt).annotate({
+        description: "Maximum consecutive tool-loop steps without user input before stop",
+      }),
+    }),
+  ),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

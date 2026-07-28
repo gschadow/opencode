@@ -17,6 +17,7 @@ import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
+import { LoopDetector } from "@opencode-ai/core/session/runner/loop-detector"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
@@ -104,6 +105,7 @@ export interface Interface {
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
+  readonly mcpTool: (input: McpToolInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
 }
@@ -591,6 +593,130 @@ const layer = Layer.effect(
       )
     })
 
+    const mcpToolImpl = Effect.fn("SessionPrompt.mcpToolImpl")(function* (input: McpToolInput) {
+      return yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const mcpSvc = yield* MCP.Service
+          const allTools = yield* mcpSvc.tools()
+          const mcpTool = allTools[input.tool]
+          if (!mcpTool) {
+            const available = Object.keys(allTools)
+            const hint = available.length ? ` Available tools: ${available.join(", ")}` : ""
+            const error = new NamedError.Unknown({ message: `MCP tool not found: "${input.tool}".${hint}` })
+            yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
+            return yield* Effect.fail(error)
+          }
+
+          const ctx = yield* InstanceState.context
+          const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+          if (session.revert) {
+            yield* revert.cleanup(session)
+          }
+          const agent = yield* agents.get(input.agent)
+          if (!agent) {
+            const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+            const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+            const error = new NamedError.Unknown({ message: `Agent not found: "${input.agent}".${hint}` })
+            yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
+            return yield* Effect.fail(error)
+          }
+          const model = input.model ?? agent.model ?? (yield* currentModel(input.sessionID))
+
+          const userMsg: SessionV1.User = {
+            id: MessageID.ascending(),
+            sessionID: input.sessionID,
+            time: { created: Date.now() },
+            role: "user",
+            agent: input.agent,
+            model: { providerID: model.providerID, modelID: model.modelID },
+          }
+          yield* sessions.updateMessage(userMsg)
+          yield* sessions.updatePart({
+            type: "text",
+            id: PartID.ascending(),
+            messageID: userMsg.id,
+            sessionID: input.sessionID,
+            text: `The following MCP tool was executed by the user: ${input.tool}`,
+            synthetic: true,
+          } satisfies SessionV1.TextPart)
+
+          const msg: SessionV1.Assistant = {
+            id: MessageID.ascending(),
+            sessionID: input.sessionID,
+            parentID: userMsg.id,
+            mode: input.agent,
+            agent: input.agent,
+            cost: 0,
+            path: { cwd: ctx.directory, root: ctx.worktree },
+            time: { created: Date.now() },
+            role: "assistant",
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: model.modelID,
+            providerID: model.providerID,
+          }
+          yield* sessions.updateMessage(msg)
+
+          const started = Date.now()
+          const part: SessionV1.ToolPart = {
+            type: "tool",
+            id: PartID.ascending(),
+            messageID: msg.id,
+            sessionID: input.sessionID,
+            tool: input.tool,
+            callID: ulid(),
+            state: {
+              status: "running",
+              time: { start: started },
+              input: input.arguments,
+            },
+          }
+          yield* sessions.updatePart(part)
+
+          let output = ""
+          const result = yield* restore(
+            mcpSvc.callTool({
+              tool: mcpTool,
+              arguments: input.arguments,
+              sessionID: input.sessionID,
+            }),
+          ).pipe(Effect.exit)
+
+          const completed = Date.now()
+          if (Exit.isSuccess(result)) {
+            const content = result.value.content ?? []
+            output = content
+              .filter((item: { type?: string }) => item.type === "text")
+              .map((item: { text?: string }) => item.text ?? "")
+              .join("\n")
+          } else {
+            output = `Error: ${Cause.prettyPrint(result.cause)}`
+          }
+
+          if (!msg.time.completed) {
+            msg.time.completed = completed
+            yield* sessions.updateMessage(msg)
+          }
+          part.state = {
+            status: "completed",
+            time: { ...part.state.time, end: completed },
+            input: part.state.input,
+            title: "",
+            metadata: { output },
+            output,
+          }
+          yield* sessions.updatePart(part)
+
+          return { info: msg, parts: [part] }
+        }),
+      )
+    })
+
+    const mcpTool: (input: McpToolInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
+      "SessionPrompt.mcpTool",
+    )(function* (input: McpToolInput) {
+      return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), mcpToolImpl(input))
+    })
+
     const getModel = Effect.fn("SessionPrompt.getModel")(function* (
       providerID: ProviderV2.ID,
       modelID: ModelV2.ID,
@@ -1054,6 +1180,7 @@ const layer = Layer.effect(
     )(function* (input: PromptInput) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
+      if (input.noReply === true) return yield* createUserMessage(input)
       const message = yield* createUserMessage(input)
       yield* sessions.touch(input.sessionID)
 
@@ -1066,7 +1193,6 @@ const layer = Layer.effect(
         yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
       }
 
-      if (input.noReply === true) return message
       return yield* loop({ sessionID: input.sessionID })
     })
 
@@ -1083,7 +1209,13 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        let effectiveUser: SessionV1.User | undefined
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        let loopSignatures: string[] = []
+        let loopCounts = new Map<string, number>()
+        let loopWarned = false
+        let strictLoopState = LoopDetector.create()
+        let looseLoopState = LoopDetector.create()
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1096,6 +1228,9 @@ const layer = Layer.effect(
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+
+          if (!effectiveUser) effectiveUser = lastUser
+          const user = effectiveUser
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1112,7 +1247,7 @@ const layer = Layer.effect(
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            user.id < lastAssistant.id
           ) {
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
@@ -1133,23 +1268,23 @@ const layer = Layer.effect(
           if (step === 1)
             yield* title({
               session,
-              modelID: lastUser.model.modelID,
-              providerID: lastUser.model.providerID,
+              modelID: user.model.modelID,
+              providerID: user.model.providerID,
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          const model = yield* getModel(user.model.providerID, user.model.modelID, sessionID)
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
+            yield* handleSubtask({ task, model, lastUser: user, sessionID, session, msgs })
             continue
           }
 
           if (task?.type === "compaction") {
             const result = yield* compaction.process({
               messages: msgs,
-              parentID: lastUser.id,
+              parentID: user.id,
               sessionID,
               auto: task.auto,
               overflow: task.overflow,
@@ -1163,20 +1298,214 @@ const layer = Layer.effect(
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
           ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+            yield* compaction.create({ sessionID, agent: user.agent, model: user.model, auto: true })
             continue
           }
 
-          const agent = yield* agents.get(lastUser.agent)
+          const agent = yield* agents.get(user.agent)
           if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
             const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-            const error = new NamedError.Unknown({ message: `Agent not found: "${lastUser.agent}".${hint}` })
+            const error = new NamedError.Unknown({ message: `Agent not found: "${user.agent}".${hint}` })
             yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
             throw error
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
+
+          const freshSession = yield* sessions.get(sessionID).pipe(Effect.orDie)
+          const cfg = yield* config.get()
+          const sessionBudget = (freshSession.metadata as Record<string, unknown> | undefined)?.budget as
+            | { maxCost?: number; maxConsecutiveSteps?: number }
+            | undefined
+          const maxCost = sessionBudget?.maxCost ?? cfg.budget?.maxCost
+          if (maxCost !== undefined && (freshSession.cost ?? 0) >= maxCost) {
+            yield* Effect.logInfo("budget exceeded, exiting loop", {
+              "session.id": sessionID,
+              cost: freshSession.cost,
+              maxCost,
+            })
+            const stopMsg: SessionV1.Assistant = {
+              id: MessageID.ascending(),
+              parentID: user.id,
+              role: "assistant",
+              mode: agent.name,
+              agent: agent.name,
+              variant: user.model.variant,
+              path: { cwd: ctx.directory, root: ctx.worktree },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              modelID: model.id,
+              providerID: model.providerID,
+              time: { created: Date.now(), completed: Date.now() },
+              finish: "stop",
+              sessionID,
+            }
+            yield* sessions.updateMessage(stopMsg)
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: stopMsg.id,
+              sessionID,
+              type: "text",
+              text: `**Session budget exceeded.** Cost $${(freshSession.cost ?? 0).toFixed(2)} has reached the $${maxCost.toFixed(2)} limit. Stopping.`,
+            })
+            break
+          }
+
+          const maxConsecutiveSteps = sessionBudget?.maxConsecutiveSteps ?? cfg.budget?.maxConsecutiveSteps
+          if (maxConsecutiveSteps !== undefined && step > 0) {
+            const lastAssistantParts = lastAssistantMsg?.parts ?? []
+            const toolParts = lastAssistantParts.filter((p): p is SessionV1.ToolPart => p.type === "tool")
+            const textParts = lastAssistantParts.filter((p): p is SessionV1.TextPart => p.type === "text")
+            
+            let strictSig = ""
+            let looseSig = ""
+            if (toolParts.length > 0) {
+              const toolNames = toolParts.map((p) => p.tool)
+              looseSig = toolNames.length === 1 ? toolNames[0] : toolNames.slice().sort().join("+")
+              
+              const toolSigs = toolParts.map((p) => {
+                const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
+                const keyArgs = [
+                  input.filePath,
+                  input.command,
+                  input.pattern,
+                  input.query,
+                ].filter(Boolean).join(",")
+                return `${p.tool}(${keyArgs})`
+              })
+              strictSig = toolSigs.length === 1 ? toolSigs[0] : toolSigs.slice().sort().join("+")
+            } else if (textParts.length > 0) {
+              const text = textParts.map((p) => p.text).join(" ").slice(0, 100)
+              strictSig = `text:${text}`
+              looseSig = "text"
+            }
+            
+            if (strictSig) {
+              strictLoopState = LoopDetector.record(strictLoopState, strictSig)
+              const strictResult = LoopDetector.detectLoop(strictLoopState, maxConsecutiveSteps)
+              
+              if (strictResult) {
+                const patternDesc = strictResult.pattern.join(" → ")
+                if (loopWarned) {
+                  yield* Effect.logInfo("strict loop detected after warning, hard stopping", {
+                    "session.id": sessionID,
+                    step,
+                    pattern: patternDesc,
+                    repeats: strictResult.repeats,
+                  })
+                  const loopMsg: SessionV1.Assistant = {
+                    id: MessageID.ascending(),
+                    parentID: user.id,
+                    role: "assistant",
+                    mode: agent.name,
+                    agent: agent.name,
+                    variant: user.model.variant,
+                    path: { cwd: ctx.directory, root: ctx.worktree },
+                    cost: 0,
+                    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                    modelID: model.id,
+                    providerID: model.providerID,
+                    time: { created: Date.now(), completed: Date.now() },
+                    finish: "stop",
+                    sessionID,
+                  }
+                  yield* sessions.updateMessage(loopMsg)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: loopMsg.id,
+                    sessionID,
+                    type: "text",
+                    text: `**Repetitive loop detected.** Pattern: ${patternDesc} (repeated ${strictResult.repeats} times). Stopping to prevent runaway costs.`,
+                  })
+                  break
+                } else {
+                  yield* Effect.logInfo("strict loop detected, injecting reassessment warning", {
+                    "session.id": sessionID,
+                    step,
+                    pattern: patternDesc,
+                    repeats: strictResult.repeats,
+                  })
+                  loopWarned = true
+                  strictLoopState = LoopDetector.reset(strictLoopState)
+                  looseLoopState = LoopDetector.reset(looseLoopState)
+                  const warnMsg: SessionV1.Assistant = {
+                    id: MessageID.ascending(),
+                    parentID: user.id,
+                    role: "assistant",
+                    mode: agent.name,
+                    agent: agent.name,
+                    variant: user.model.variant,
+                    path: { cwd: ctx.directory, root: ctx.worktree },
+                    cost: 0,
+                    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                    modelID: model.id,
+                    providerID: model.providerID,
+                    time: { created: Date.now(), completed: Date.now() },
+                    finish: "tool-calls",
+                    sessionID,
+                  }
+                  yield* sessions.updateMessage(warnMsg)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: warnMsg.id,
+                    sessionID,
+                    type: "text",
+                    text: `**Loop detection warning:** You appear to be repeating the exact same operations. Pattern: ${patternDesc} (repeated ${strictResult.repeats} times). Please step back and reassess your approach. Consider: Is there a different strategy? Are you stuck on the same error? What's the actual goal here?`,
+                  })
+                  continue
+                }
+              }
+            } else {
+              strictLoopState = LoopDetector.reset(strictLoopState)
+              loopWarned = false
+            }
+            
+            if (looseSig) {
+              looseLoopState = LoopDetector.record(looseLoopState, looseSig)
+              const looseResult = LoopDetector.detectLoop(looseLoopState, maxConsecutiveSteps * 2)
+              
+              if (looseResult && !loopWarned) {
+                const patternDesc = looseResult.pattern.join(" → ")
+                yield* Effect.logInfo("loose loop detected, injecting reassessment warning", {
+                  "session.id": sessionID,
+                  step,
+                  pattern: patternDesc,
+                  repeats: looseResult.repeats,
+                })
+                loopWarned = true
+                strictLoopState = LoopDetector.reset(strictLoopState)
+                looseLoopState = LoopDetector.reset(looseLoopState)
+                const warnMsg: SessionV1.Assistant = {
+                  id: MessageID.ascending(),
+                  parentID: user.id,
+                  role: "assistant",
+                  mode: agent.name,
+                  agent: agent.name,
+                  variant: user.model.variant,
+                  path: { cwd: ctx.directory, root: ctx.worktree },
+                  cost: 0,
+                  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                  modelID: model.id,
+                  providerID: model.providerID,
+                  time: { created: Date.now(), completed: Date.now() },
+                  finish: "tool-calls",
+                  sessionID,
+                }
+                yield* sessions.updateMessage(warnMsg)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: warnMsg.id,
+                  sessionID,
+                  type: "text",
+                  text: `**Loop detection warning:** You appear to be repeating a similar sequence of operations. Pattern: ${patternDesc} (repeated ${looseResult.repeats} times). Please step back and reassess your approach. Consider: Is there a different strategy? Are you making progress toward the goal?`,
+                })
+                continue
+              }
+            } else {
+              looseLoopState = LoopDetector.reset(looseLoopState)
+            }
+          }
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
             Effect.provideService(FSUtil.Service, fsys),
@@ -1185,11 +1514,11 @@ const layer = Layer.effect(
 
           const msg: SessionV1.Assistant = {
             id: MessageID.ascending(),
-            parentID: lastUser.id,
+            parentID: user.id,
             role: "assistant",
             mode: agent.name,
             agent: agent.name,
-            variant: lastUser.model.variant,
+            variant: user.model.variant,
             path: { cwd: ctx.directory, root: ctx.worktree },
             cost: 0,
             tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -1240,9 +1569,9 @@ const layer = Layer.effect(
               Effect.provideService(RuntimeFlags.Service, flags),
             )
 
-            if (lastUser.format?.type === "json_schema") {
+            if (user.format?.type === "json_schema") {
               tools["StructuredOutput"] = createStructuredOutputTool({
-                schema: lastUser.format.schema,
+                schema: user.format.schema,
                 onSuccess(output) {
                   structured = output
                 },
@@ -1250,7 +1579,7 @@ const layer = Layer.effect(
             }
 
             if (step === 1)
-              yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
+              yield* summary.summarize({ sessionID, messageID: user.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
@@ -1267,10 +1596,10 @@ const layer = Layer.effect(
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
             ]
-            const format = lastUser.format ?? { type: "text" as const }
+            const format = user.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
-              user: lastUser,
+              user: user,
               agent,
               permission: session.permission,
               sessionID,
@@ -1320,8 +1649,8 @@ const layer = Layer.effect(
             if (result === "compact") {
               yield* compaction.create({
                 sessionID,
-                agent: lastUser.agent,
-                model: lastUser.model,
+                agent: user.agent,
+                model: user.model,
                 auto: true,
                 overflow: !handle.message.finish,
               })
@@ -1343,7 +1672,31 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+      let result: SessionV1.WithParts
+      while (true) {
+        result = yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+        const after = yield* MessageV2.filterCompactedEffect(input.sessionID).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        const latest = MessageV2.latest(after)
+        const latestUser = latest.user
+        const latestAssistant = latest.assistant
+        if (!latestUser || !latestAssistant) {
+          yield* Effect.logInfo("loop: no user or assistant", { "session.id": input.sessionID })
+          break
+        }
+        if (latestUser.id <= latestAssistant.id) {
+          yield* Effect.logInfo("loop: no pending", { "session.id": input.sessionID })
+          break
+        }
+        const parts = after.find((m) => m.info.id === latestUser.id)?.parts ?? []
+        if (parts.every((p) => p.type !== "text" || !p.text || p.text.startsWith("BTW: "))) {
+          yield* Effect.logInfo("loop: pending is btw", { "session.id": input.sessionID })
+          break
+        }
+        yield* Effect.logInfo("loop: chaining pending", { "session.id": input.sessionID })
+      }
+      return result
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
@@ -1485,6 +1838,7 @@ const layer = Layer.effect(
       prompt,
       loop,
       shell,
+      mcpTool,
       command,
       resolvePromptParts,
     })
@@ -1532,6 +1886,15 @@ export const ShellInput = Schema.Struct({
   command: Schema.String,
 })
 export type ShellInput = Schema.Schema.Type<typeof ShellInput>
+
+export const McpToolInput = Schema.Struct({
+  sessionID: SessionID,
+  agent: Schema.String,
+  model: Schema.optional(ModelRef),
+  tool: Schema.String,
+  arguments: Schema.Unknown,
+})
+export type McpToolInput = Schema.Schema.Type<typeof McpToolInput>
 
 export const CommandInput = Schema.Struct({
   messageID: Schema.optional(MessageID),
