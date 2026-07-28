@@ -28,6 +28,7 @@ import {
   ForkPayload,
   InitPayload,
   ListQuery,
+  McpToolPayload,
   MessagesQuery,
   PermissionResponsePayload,
   PromptPayload,
@@ -346,6 +347,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
     })
 
+    const mcpTool = Effect.fn("SessionHttpApi.mcpTool")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof McpToolPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* SessionError.mapBusy(promptSvc.mcpTool({ ...ctx.payload, sessionID: ctx.params.sessionID }))
+    })
+
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {
       params: { sessionID: SessionID }
       payload: typeof RevertPayload.Type
@@ -432,6 +441,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("promptAsync", promptAsync)
       .handle("command", command)
       .handle("shell", shell)
+      .handle("mcpTool", mcpTool)
       .handle("revert", revert)
       .handle("unrevert", unrevert)
       .handle("permissionRespond", permissionRespond)

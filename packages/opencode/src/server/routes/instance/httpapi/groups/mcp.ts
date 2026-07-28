@@ -31,12 +31,19 @@ export class UnsupportedOAuthError extends Schema.ErrorClass<UnsupportedOAuthErr
 
 export const McpPaths = {
   status: "/mcp",
+  tools: "/mcp/tools",
   auth: "/mcp/:name/auth",
   authCallback: "/mcp/:name/auth/callback",
   authAuthenticate: "/mcp/:name/auth/authenticate",
   connect: "/mcp/:name/connect",
   disconnect: "/mcp/:name/disconnect",
 } as const
+
+export const ToolDef = Schema.Struct({
+  name: Schema.String,
+  description: Schema.optional(Schema.String),
+  inputSchema: Schema.Unknown,
+})
 
 export const McpApi = HttpApi.make("mcp")
   .add(
@@ -50,6 +57,16 @@ export const McpApi = HttpApi.make("mcp")
             identifier: "mcp.status",
             summary: "Get MCP status",
             description: "Get the status of all Model Context Protocol (MCP) servers.",
+          }),
+        ),
+        HttpApiEndpoint.get("tools", McpPaths.tools, {
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(ToolDef), "MCP tool definitions"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.tools",
+            summary: "List MCP tools",
+            description: "Get all available MCP tool definitions with their names, descriptions, and input schemas.",
           }),
         ),
         HttpApiEndpoint.post("add", McpPaths.status, {

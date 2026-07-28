@@ -44,6 +44,7 @@ import { formatDuration } from "../../util/format"
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+import { DialogMcpTools } from "../dialog-mcp-tools"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -1068,11 +1069,18 @@ export function Prompt(props: PromptProps) {
     if (store.mode === "shell") {
       move.startSubmit()
       if (inputText === "?") {
-        toast.show({
-          variant: "info",
-          message: "MCP tool mode:\n!!tool_name — call tool with no args\n!!tool_name {json} — call with JSON args\n!!tool_name \"string\" — call with string arg",
-          duration: 5000,
-        })
+        dialog.replace(() => (
+          <DialogMcpTools
+            onSelect={(toolName, argsTemplate) => {
+              const text = `!${toolName} ${argsTemplate}`
+              input.setText(text)
+              setStore("prompt", { input: text, parts: [] })
+              setStore("mode", "shell")
+            }}
+          />
+        ))
+        setStore("mode", "normal")
+        return true
       } else if (inputText.startsWith("!")) {
         const toolInput = inputText.slice(1).trim()
         const spaceIndex = toolInput.indexOf(" ")
@@ -1092,22 +1100,35 @@ export function Prompt(props: PromptProps) {
             return false
           }
         }
-        void sdk.client.session
-          .mcpTool({
-            sessionID,
-            agent: agent.name,
-            model: {
-              providerID: selectedModel.providerID,
-              modelID: selectedModel.modelID,
-            },
-            tool: toolName,
-            arguments: args,
+        void sdk
+          .request(`/session/${encodeURIComponent(sessionID)}/tool`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              agent: agent.name,
+              model: {
+                providerID: selectedModel.providerID,
+                modelID: selectedModel.modelID,
+              },
+              tool: toolName,
+              arguments: args,
+            }),
+          })
+          .then(async (res) => {
+            if (!res.ok) {
+              const text = await res.text()
+              toast.show({
+                variant: "error",
+                message: `!! ${toolName}: ${text}`,
+                duration: 5000,
+              })
+            }
           })
           .catch((error) => {
             toast.show({
               variant: "error",
-              message: `Tool call failed: ${errorMessage(error)}`,
-              duration: 3000,
+              message: `!! ${toolName}: ${errorMessage(error)}`,
+              duration: 5000,
             })
           })
       } else {
