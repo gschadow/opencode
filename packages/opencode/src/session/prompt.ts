@@ -1364,14 +1364,19 @@ const layer = Layer.effect(
               const exemptRegex = exemptPattern ? new RegExp(exemptPattern) : null
               const isExempt = exemptRegex ? toolParts.some((p) => exemptRegex.test(p.tool)) : false
               
-              // Exact signature: all arguments
+              // Exact signature: all arguments (hash long values to avoid false positives from truncation)
               const exactSigs = toolParts
                 .filter((p) => !exemptRegex || !exemptRegex.test(p.tool))
                 .map((p) => {
                   const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
                   const args = Object.entries(input)
                     .filter(([, v]) => v !== undefined && v !== null && v !== "")
-                    .map(([k, v]) => `${k}:${typeof v === "string" ? v.slice(0, 80) : String(v)}`)
+                    .map(([k, v]) => {
+                      const str = typeof v === "string" ? v : String(v)
+                      // Hash long arguments to avoid false positives from truncation
+                      const value = str.length > 80 ? `hash:${str.length}:${str.slice(0, 20)}` : str
+                      return `${k}:${value}`
+                    })
                     .sort()
                     .join(",")
                   return `${p.tool}(${args})`
