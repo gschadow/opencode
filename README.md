@@ -175,6 +175,12 @@ This fork of `anomalyco/opencode` adds the following changes not present upstrea
 - **OpenAI chat protocol fix** (`packages/llm/src/protocols/openai-chat.ts`) —
   Compatibility adjustment for LLM protocol handling.
 
+- **SSE reconnection resilience** (`packages/tui/src/context/sdk.tsx`) —
+  When the server restarts, the TUI's SSE event stream now properly recovers
+  instead of dying permanently. Wrapped the connect+read loop in a try/catch
+  so a connection refused error (server not ready yet) just retries with
+  exponential backoff instead of terminating reconnection forever.
+
 ---
 
 **Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
