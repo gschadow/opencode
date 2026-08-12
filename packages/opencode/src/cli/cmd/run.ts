@@ -259,6 +259,18 @@ export const RunCommand = effectCmd({
         default: false,
         hidden: true,
         describe: "enable direct interactive demo slash commands; pass one as the message to run it immediately",
+      })
+      .option("preflight", {
+        type: "string",
+        describe: "MCP tool to call before prompting (e.g., 'email_search'). If result is empty, exits 2.",
+      })
+      .option("preflight-args", {
+        type: "string",
+        describe: "JSON arguments for --preflight tool (e.g., '{\"keyword\":\"$TriagePassed\"}')",
+      })
+      .option("preflight-template", {
+        type: "string",
+        describe: "Message template with {preflight} placeholder for tool result (default: append result to message)",
       }),
   handler: Effect.fn("Cli.run")(function* (args) {
     const { Agent } = yield* Effect.promise(() => import("@/agent/agent"))
@@ -416,6 +428,70 @@ export const RunCommand = effectCmd({
       const piped = process.stdin.isTTY ? undefined : await Bun.stdin.text()
       message = resolveRunInput(message, piped) ?? ""
       const initialInput = resolveRunInput(rawMessage, piped)
+
+      if (args.preflight && args.attach) {
+        UI.error("--preflight is not supported with --attach (preflight requires local MCP servers)")
+        process.exit(1)
+      }
+
+      if (args.preflight && !localInstance) {
+        UI.error("--preflight requires a local instance (instance not loaded)")
+        process.exit(1)
+      }
+
+      if (args.preflight && localInstance) {
+        const { MCP } = await import("@/mcp")
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        const toolName = args.preflight
+        const preflightEffect = Effect.gen(function* () {
+          const mcpSvc = yield* MCP.Service
+          const allTools = yield* mcpSvc.tools()
+          const mcpTool = allTools[toolName]
+          if (!mcpTool) {
+            const available = Object.keys(allTools).join(", ")
+            UI.error(`Preflight MCP tool not found: "${toolName}". Available: ${available || "(none)"}`)
+            process.exit(1)
+          }
+          let toolArgs: Record<string, unknown> = {}
+          if (args["preflight-args"]) {
+            try {
+              toolArgs = JSON.parse(args["preflight-args"])
+            } catch (e) {
+              UI.error(`Invalid --preflight-args JSON: ${e instanceof Error ? e.message : e}`)
+              process.exit(1)
+            }
+          }
+          return yield* mcpSvc.callTool({ tool: mcpTool, arguments: toolArgs, sessionID: "preflight" })
+        })
+        const result = await AppRuntime.runPromise(
+          preflightEffect.pipe(Effect.provideService(InstanceRef, localInstance)),
+        )
+        const textContent = (result.content ?? [])
+          .filter((item: { type?: string }) => item.type === "text")
+          .map((item: { type?: string; text?: string }) => item.text ?? "")
+          .join("\n")
+        let isEmpty = false
+        try {
+          const parsed = JSON.parse(textContent)
+          if (typeof parsed.count === "number" && parsed.count === 0) isEmpty = true
+          if (Array.isArray(parsed) && parsed.length === 0) isEmpty = true
+          if (Array.isArray(parsed.messages) && parsed.messages.length === 0) isEmpty = true
+        } catch {
+          if (!textContent.trim()) isEmpty = true
+        }
+        if (isEmpty) {
+          if (args.format === "json") {
+            process.stdout.write(JSON.stringify({ type: "preflight", empty: true, tool: toolName }) + EOL)
+          }
+          process.exit(2)
+        }
+        const template = args["preflight-template"]
+        if (template) {
+          message = template.replace(/\{preflight\}/g, textContent)
+        } else {
+          message = message ? message + "\n\n" + textContent : textContent
+        }
+      }
 
       if (message.trim().length === 0 && !args.command && !interactive) {
         UI.error("You must provide a message or a command")
@@ -1007,5 +1083,10 @@ export async function runMini(input: MiniCommandInput) {
     "dangerously-skip-permissions": false,
     dangerouslySkipPermissions: false,
     demo: input.demo ?? false,
+    preflight: undefined,
+    "preflight-args": undefined,
+    "preflight-template": undefined,
+    preflightArgs: undefined,
+    preflightTemplate: undefined,
   })
 }
