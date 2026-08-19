@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import { dynamicTool, jsonSchema, type JSONSchema7, type Tool } from "ai"
 import { Effect } from "effect"
+import type { McpTool } from "./index"
 
 const DEFAULT_TIMEOUT = 30_000
 const MAX_LIST_PAGES = 1_000
@@ -74,7 +75,7 @@ export async function callTool(
     content: [{ type: "text" as const, text: JSON.stringify(result.structuredContent) }],
   }
 }
-}
+
 
 export function defs(client: Client, timeout?: number) {
   return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))

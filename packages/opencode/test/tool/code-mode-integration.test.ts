@@ -153,14 +153,7 @@ async function buildTool() {
       clients: () => Effect.succeed({ [SERVER]: {} as any }),
       callTool: (input) =>
         Effect.tryPromise({
-          try: () =>
-            McpCatalog.callTool(
-              input.tool.def,
-              input.tool.client,
-              input.arguments,
-              { abortSignal: input.signal },
-              input.tool.timeout,
-            ),
+          try: () => McpCatalog.callTool(input.tool, (input.arguments ?? {}) as Record<string, unknown>, input.signal),
           catch: (error) => error,
         }),
     }),

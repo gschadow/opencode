@@ -20,5 +20,10 @@ export const State = Schema.Struct({
   snapshot: Schema.String.pipe(optional),
   diff: Schema.String.pipe(optional),
   files: Schema.Array(FileDiff).pipe(optional),
+  // When the revert was staged. Used to keep durable messages intact while
+  // filtering the model's view to the revert boundary: messages created between
+  // the boundary message and this staging time are treated as "undone", messages
+  // created at/after this time are the continuation after undo.
+  time: Schema.Number.pipe(optional),
 }).annotate({ identifier: "Revert.State" })
 export interface State extends Schema.Schema.Type<typeof State> {}

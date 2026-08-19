@@ -73,6 +73,7 @@ export function fromRow(row: SessionRow): Info {
         partID: row.revert.partID ? PartID.make(row.revert.partID) : undefined,
         snapshot: row.revert.snapshot,
         diff: row.revert.diff,
+        time: row.revert.time,
       }
     : undefined
   return {
@@ -148,6 +149,7 @@ export function toRow(info: Info) {
           partID: info.revert.partID,
           snapshot: info.revert.snapshot,
           diff: info.revert.diff,
+          time: info.revert.time,
         }
       : null,
     permission: info.permission,
@@ -211,6 +213,11 @@ const Revert = Schema.Struct({
   partID: optional(PartID),
   snapshot: optional(Schema.String),
   diff: optional(Schema.String),
+  // When the revert was staged. Used to keep durable messages intact while
+  // filtering the model's view to the revert boundary: messages created between
+  // the boundary message and this staging time are treated as "undone", messages
+  // created at/after this time are the continuation after undo.
+  time: optional(Schema.Number),
 })
 
 const Model = Schema.Struct({

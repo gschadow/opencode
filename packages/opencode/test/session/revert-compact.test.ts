@@ -47,6 +47,30 @@ const userAt = Effect.fn("test.userAt")(function* (sessionID: SessionID, id: str
   })
 })
 
+const assistantAt = Effect.fn("test.assistantAt")(function* (
+  sessionID: SessionID,
+  id: string,
+  created: number,
+  parentID: MessageID,
+) {
+  const session = yield* Session.Service
+  return yield* session.updateMessage({
+    id: MessageID.make(id),
+    role: "assistant" as const,
+    sessionID,
+    mode: "default",
+    agent: "default",
+    path: { cwd: "", root: "" },
+    cost: 0,
+    tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ModelV2.ID.make("gpt-4"),
+    providerID: ProviderV2.ID.make("openai"),
+    parentID,
+    time: { created },
+    finish: "end_turn",
+  })
+})
+
 const assistant = Effect.fn("test.assistant")(function* (sessionID: SessionID, parentID: MessageID, dir: string) {
   const session = yield* Session.Service
   return yield* session.updateMessage({
@@ -255,14 +279,17 @@ describe("revert + compact workflow", () => {
 
           yield* revert.cleanup(sessionInfo)
 
+          // Non-destructive cleanup: all messages survive a staged revert, so no
+          // conversation history is ever lost after a restart.
           messages = yield* session.messages({ sessionID })
           const remainingIds = messages.map((m) => m.info.id)
-          expect(messages.length).toBeLessThan(4)
-          expect(remainingIds).not.toContain(userMsg2.id)
-          expect(remainingIds).not.toContain(assistantMsg2.id)
+          expect(messages.length).toBe(4)
+          expect(remainingIds).toContain(userMsg2.id)
+          expect(remainingIds).toContain(assistantMsg2.id)
 
+          // The revert marker is preserved (only unrevert/redo clears it).
           sessionInfo = yield* session.get(sessionID)
-          expect(sessionInfo.revert).toBeUndefined()
+          expect(sessionInfo.revert).toBeDefined()
 
           yield* session.remove(sessionID)
         }),
@@ -346,13 +373,13 @@ describe("revert + compact workflow", () => {
           let sessionInfo = yield* session.get(sessionID)
           expect(sessionInfo.revert).toBeDefined()
 
+          // A staged revert must never delete messages, even when cleanup runs on
+          // the next prompt after a client restart. This is the regression that
+          // wiped a whole conversation's history.
           yield* revert.cleanup(sessionInfo)
 
-          sessionInfo = yield* session.get(sessionID)
-          expect(sessionInfo.revert).toBeUndefined()
-
           const messages = yield* session.messages({ sessionID })
-          expect(messages.length).toBe(0)
+          expect(messages.length).toBe(2)
 
           yield* session.remove(sessionID)
         }),
@@ -361,7 +388,7 @@ describe("revert + compact workflow", () => {
   )
 
   it.live(
-    "cleanup with partID removes parts from the revert point onward",
+    "cleanup with partID leaves parts and the revert marker intact",
     provideTmpdirInstance(
       () =>
         Effect.gen(function* () {
@@ -378,7 +405,7 @@ describe("revert + compact workflow", () => {
 
           yield* session.setRevert({
             sessionID: sid,
-            revert: { messageID: u1.id, partID: p2.id },
+            revert: { messageID: u1.id, partID: p2.id, time: Date.now() },
             summary: { additions: 0, deletions: 0, files: 0 },
           })
 
@@ -387,18 +414,17 @@ describe("revert + compact workflow", () => {
 
           const msgs = yield* session.messages({ sessionID: sid })
           expect(msgs.length).toBe(1)
-          expect(msgs[0].parts.length).toBe(1)
-          expect(msgs[0].parts[0].id).toBe(p1.id)
+          expect(msgs[0].parts.length).toBe(3)
 
-          const cleared = yield* session.get(sid)
-          expect(cleared.revert).toBeUndefined()
+          const after = yield* session.get(sid)
+          expect(after.revert).toBeDefined()
         }),
       { git: true },
     ),
   )
 
   it.live(
-    "cleanup removes messages after revert point but keeps earlier ones",
+    "cleanup leaves messages after the revert point intact",
     provideTmpdirInstance(
       (dir) =>
         Effect.gen(function* () {
@@ -420,7 +446,7 @@ describe("revert + compact workflow", () => {
 
           yield* session.setRevert({
             sessionID: sid,
-            revert: { messageID: u2.id },
+            revert: { messageID: u2.id, time: Date.now() },
             summary: { additions: 0, deletions: 0, files: 0 },
           })
 
@@ -431,41 +457,54 @@ describe("revert + compact workflow", () => {
           const ids = msgs.map((m) => m.info.id)
           expect(ids).toContain(u1.id)
           expect(ids).toContain(a1.id)
-          expect(ids).not.toContain(u2.id)
-          expect(ids).not.toContain(a2.id)
+          expect(ids).toContain(u2.id)
+          expect(ids).toContain(a2.id)
         }),
       { git: true },
     ),
   )
 
   it.live(
-    "reverts chronological suffixes on both sides of mixed message ID ordering",
+    "filterRevert trims the model view at the revert boundary without deleting",
     provideTmpdirInstance(
       () =>
         Effect.gen(function* () {
           const session = yield* Session.Service
-          const revert = yield* SessionRevert.Service
-          const ids = ["msg_z9-before", "msg_z1-before-wrap", "msg_a0-after-wrap", "msg_a1-after"]
 
-          const run = Effect.fn("test.mixedIDRevert")(function* (target: number) {
-            const info = yield* session.create({})
-            for (const [index, id] of ids.entries()) {
-              const message = yield* userAt(info.id, id, index + 1)
-              yield* text(info.id, message.id, id)
-            }
+          const info = yield* session.create({})
+          const sid = info.id
 
-            const reverted = yield* revert.revert({
-              sessionID: info.id,
-              messageID: MessageID.make(ids[target]!),
-            })
-            yield* revert.cleanup(reverted)
-            const remaining = yield* session.messages({ sessionID: info.id })
-            yield* session.remove(info.id)
-            return remaining.map((msg) => msg.info.time.created)
+          const u1 = yield* userAt(sid, "msg_m1", 1)
+          yield* text(sid, u1.id, "first")
+          const a1 = yield* assistantAt(sid, "msg_m2", 2, u1.id)
+          yield* text(sid, a1.id, "answer 1")
+
+          const u2 = yield* userAt(sid, "msg_m3", 3)
+          yield* text(sid, u2.id, "second")
+          const a2 = yield* assistantAt(sid, "msg_m4", 4, u2.id)
+          yield* text(sid, a2.id, "answer 2")
+
+          const stagedAt = 100
+
+          yield* session.setRevert({
+            sessionID: sid,
+            revert: { messageID: u2.id, time: stagedAt },
+            summary: { additions: 0, deletions: 0, files: 0 },
           })
 
-          expect(yield* run(1)).toEqual([1])
-          expect(yield* run(2)).toEqual([1, 2])
+          // Everything at/before the boundary plus the continuation is kept in the
+          // model view; the undone message pair (u2/a2) is dropped only from the view.
+          const msgs = yield* session.messages({ sessionID: sid })
+          const view = MessageV2.filterRevert(msgs, (yield* session.get(sid)).revert ?? undefined)
+          const ids = view.map((m) => m.info.id)
+          expect(ids).toContain(u1.id)
+          expect(ids).toContain(a1.id)
+          expect([...ids].includes(u2.id)).toBe(false)
+          expect([...ids].includes(a2.id)).toBe(false)
+
+          // Durable rows are untouched, so Redo/unrevert can restore them.
+          const stored = yield* session.messages({ sessionID: sid })
+          expect(stored.length).toBe(4)
         }),
       { git: true },
     ),

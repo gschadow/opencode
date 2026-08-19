@@ -596,15 +596,14 @@ const layer = Layer.effect(
     const mcpToolImpl = Effect.fn("SessionPrompt.mcpToolImpl")(function* (input: McpToolInput) {
       return yield* Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
-          const mcpSvc = yield* MCP.Service
-          const allTools = yield* mcpSvc.tools()
+          const allTools = yield* mcp.tools()
           const mcpTool = allTools[input.tool]
           if (!mcpTool) {
             const available = Object.keys(allTools)
             const hint = available.length ? ` Available tools: ${available.join(", ")}` : ""
             const error = new NamedError.Unknown({ message: `MCP tool not found: "${input.tool}".${hint}` })
             yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
-            return yield* Effect.fail(error)
+            throw error
           }
 
           const ctx = yield* InstanceState.context
@@ -618,7 +617,7 @@ const layer = Layer.effect(
             const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
             const error = new NamedError.Unknown({ message: `Agent not found: "${input.agent}".${hint}` })
             yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
-            return yield* Effect.fail(error)
+            throw error
           }
           const model = input.model ?? agent.model ?? (yield* currentModel(input.sessionID))
 
@@ -667,14 +666,14 @@ const layer = Layer.effect(
             state: {
               status: "running",
               time: { start: started },
-              input: input.arguments,
+              input: input.arguments as Record<string, any>,
             },
           }
           yield* sessions.updatePart(part)
 
           let output = ""
           const result = yield* restore(
-            mcpSvc.callTool({
+            mcp.callTool({
               tool: mcpTool,
               arguments: input.arguments,
               sessionID: input.sessionID,
@@ -685,11 +684,11 @@ const layer = Layer.effect(
           if (Exit.isSuccess(result)) {
             const content = result.value.content ?? []
             output = content
-              .filter((item: { type?: string }) => item.type === "text")
-              .map((item: { text?: string }) => item.text ?? "")
+              .filter((item) => item.type === "text")
+              .map((item) => (item.type === "text" ? item.text : ""))
               .join("\n")
           } else {
-            output = `Error: ${Cause.prettyPrint(result.cause)}`
+            output = `Error: ${Cause.pretty(result.cause)}`
           }
 
           if (!msg.time.completed) {
@@ -698,8 +697,8 @@ const layer = Layer.effect(
           }
           part.state = {
             status: "completed",
-            time: { ...part.state.time, end: completed },
-            input: part.state.input,
+            time: { start: started, end: completed },
+            input: input.arguments as Record<string, any>,
             title: "",
             metadata: { output },
             output,
@@ -1180,9 +1179,6 @@ const layer = Layer.effect(
     )(function* (input: PromptInput) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
-      if (input.noReply === true) return yield* createUserMessage(input)
-      const message = yield* createUserMessage(input)
-      yield* sessions.touch(input.sessionID)
 
       const permissions: PermissionV1.Rule[] = []
       for (const [t, enabled] of Object.entries(input.tools ?? {})) {
@@ -1192,6 +1188,10 @@ const layer = Layer.effect(
         session.permission = permissions
         yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
       }
+
+      if (input.noReply === true) return yield* createUserMessage(input)
+      const message = yield* createUserMessage(input)
+      yield* sessions.touch(input.sessionID)
 
       return yield* loop({ sessionID: input.sessionID })
     })
@@ -1214,6 +1214,7 @@ const layer = Layer.effect(
         let loopWarned = false
         let loopState = LoopDetector.create()
         let targetLoopState = LoopDetector.create()
+        let recentlyCompacted = false
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1222,6 +1223,7 @@ const layer = Layer.effect(
           let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
             Effect.provideService(Database.Service, database),
           )
+          msgs = MessageV2.filterRevert(msgs, session.revert)
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
@@ -1245,7 +1247,7 @@ const layer = Layer.effect(
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            user.id < lastAssistant.id && lastAssistant.parentID === lastUser.id
+            lastAssistant.parentID === lastUser.id
           ) {
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
@@ -1288,10 +1290,13 @@ const layer = Layer.effect(
               overflow: task.overflow,
             })
             if (result === "stop") break
+            recentlyCompacted = true
             continue
           }
 
-          if (
+          if (recentlyCompacted) {
+            recentlyCompacted = false
+          } else if (
             lastFinished &&
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))

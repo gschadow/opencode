@@ -269,6 +269,7 @@ export type SessionsListOutput = {
         readonly deletions: number
         readonly patch: string
       }>
+      readonly time?: number | "Infinity" | "-Infinity" | "NaN"
     }
   }>
   readonly cursor: { readonly previous?: string | null; readonly next?: string | null }
@@ -331,6 +332,7 @@ export type SessionsCreateOutput = {
         readonly deletions: number
         readonly patch: string
       }>
+      readonly time?: number | "Infinity" | "-Infinity" | "NaN"
     }
   }
 }["data"]
@@ -369,6 +371,7 @@ export type SessionsGetOutput = {
         readonly deletions: number
         readonly patch: string
       }>
+      readonly time?: number | "Infinity" | "-Infinity" | "NaN"
     }
   }
 }["data"]
@@ -517,6 +520,7 @@ export type SessionsStageOutput = {
       readonly deletions: number
       readonly patch: string
     }>
+    readonly time?: number | "Infinity" | "-Infinity" | "NaN"
   }
 }["data"]
 
@@ -1121,6 +1125,7 @@ export type SessionsHistoryOutput = {
               readonly deletions: number
               readonly patch: string
             }>
+            readonly time?: number | "Infinity" | "-Infinity" | "NaN"
           }
         }
       }
@@ -1579,6 +1584,7 @@ export type SessionsEventsOutput =
             readonly deletions: number
             readonly patch: string
           }>
+          readonly time?: number
         }
       }
     }
@@ -2770,6 +2776,7 @@ export type ServerSecureInputListAllOutput = {
     readonly sessionID: string
     readonly sessionName: string
     readonly prompt: string
+    readonly command?: string
   }>
 }
 
@@ -2781,6 +2788,7 @@ export type ServerSecureInputListOutput = {
     readonly sessionID: string
     readonly sessionName: string
     readonly prompt: string
+    readonly command?: string
   }>
 }["data"]
 

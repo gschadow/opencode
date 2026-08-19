@@ -58,6 +58,7 @@ const layer = Layer.effect(
               rev = {
                 messageID: !partID && lastUser ? lastUser.id : msg.info.id,
                 partID,
+                time: Date.now(),
               }
             }
             remaining.push(part)
@@ -98,29 +99,18 @@ const layer = Layer.effect(
       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
     })
 
-    const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {
-      if (!session.revert) return
-      const sessionID = session.id
-      const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
-      const messageID = session.revert.messageID
-      const index = msgs.findIndex((msg) => msg.info.id === messageID)
-      const target = index < 0 ? undefined : msgs[index]
-      const remove = index < 0 ? [] : msgs.slice(index + (session.revert.partID ? 1 : 0))
-      for (const msg of remove) {
-        yield* sessions.removeMessage({ sessionID, messageID: msg.info.id })
-      }
-      if (session.revert.partID && target) {
-        const partID = session.revert.partID
-        const idx = target.parts.findIndex((part) => part.id === partID)
-        if (idx >= 0) {
-          const removeParts = target.parts.slice(idx)
-          target.parts = target.parts.slice(0, idx)
-          for (const part of removeParts) {
-            yield* sessions.removePart({ sessionID, messageID: target.info.id, partID: part.id })
-          }
-        }
-      }
-      yield* sessions.clearRevert(sessionID)
+    // Finalize an outstanding revert WITHOUT destroying history. A staged revert is
+    // a boundary marker: undo (revert) means "stop treating messages after the
+    // revert point as part of the current context", not "delete them".
+    //
+    // This deliberately does nothing: it never calls removeMessage/removePart and it
+    // never clears the marker on its own. A stale revert marker persisted on the
+    // session row must not be able to silently wipe (or even silently clear) the
+    // conversation when the next prompt/tool runs after a client restart. The model
+    // view is reconciled against the revert boundary in the prompt loop, and the
+    // marker is cleared only by an explicit, user-confirmed resolution (unrevert/redo).
+    const cleanup = Effect.fn("SessionRevert.cleanup")(function* (_session: Session.Info) {
+      return
     })
 
     return Service.of({ revert, unrevert, cleanup })

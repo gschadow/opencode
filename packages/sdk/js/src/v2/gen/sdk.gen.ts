@@ -111,6 +111,8 @@ import type {
   McpRemoteConfig,
   McpStatusErrors,
   McpStatusResponses,
+  McpToolsErrors,
+  McpToolsResponses,
   ModelRef,
   MoveSessionDestination,
   OutputFormat,
@@ -198,6 +200,8 @@ import type {
   SessionInitResponses,
   SessionListErrors,
   SessionListResponses,
+  SessionMcpToolErrors,
+  SessionMcpToolResponses,
   SessionMessageErrors,
   SessionMessageResponses,
   SessionMessagesErrors,
@@ -2471,6 +2475,36 @@ export class Mcp extends HeyApiClient {
   }
 
   /**
+   * List MCP tools
+   *
+   * Get all available MCP tool definitions with their names, descriptions, and input schemas.
+   */
+  public tools<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<McpToolsResponses, McpToolsErrors, ThrowOnError>({
+      url: "/mcp/tools",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Connect an MCP server.
    */
   public connect<ThrowOnError extends boolean = false>(
@@ -4252,6 +4286,54 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).post<SessionShellResponses, SessionShellErrors, ThrowOnError>({
       url: "/session/{sessionID}/shell",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Call MCP tool
+   *
+   * Execute an MCP tool directly within the session context and return the result.
+   */
+  public mcpTool<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      agent?: string
+      model?: {
+        providerID: string
+        modelID: string
+      }
+      tool?: string
+      arguments?: unknown
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "agent" },
+            { in: "body", key: "model" },
+            { in: "body", key: "tool" },
+            { in: "body", key: "arguments" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionMcpToolResponses, SessionMcpToolErrors, ThrowOnError>({
+      url: "/session/{sessionID}/tool",
       ...options,
       ...params,
       headers: {

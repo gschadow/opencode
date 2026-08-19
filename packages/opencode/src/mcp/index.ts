@@ -14,6 +14,7 @@ import {
   LoggingMessageNotificationSchema,
   type Tool as MCPToolDef,
   ToolListChangedNotificationSchema,
+  type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js"
 import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
@@ -78,15 +79,7 @@ function createClient(
   directory: string,
   onSecureInput?: (token: string, sessionName: string, prompt: string, command: string) => Promise<{ value: string }>,
 ) {
-  const client = new Client(
-    { name: "opencode", version: InstallationVersion },
-    {
-      ...CLIENT_OPTIONS,
-      listChanged: {
-        tools: { autoRefresh: false, onChanged: (error) => client.onToolsChanged?.(error) },
-      },
-    },
-  )
+  const client = new Client({ name: "opencode", version: InstallationVersion }, CLIENT_OPTIONS)
   client.setRequestHandler(ListRootsRequestSchema, () =>
     Promise.resolve({ roots: [{ uri: pathToFileURL(directory).href }] }),
   )

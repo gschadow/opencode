@@ -575,6 +575,33 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
   return filterCompacted(yield* stream(sessionID))
 })
 
+// Apply an outstanding revert boundary to the model's view WITHOUT deleting any
+// messages. Undo (revert to messageID) means "this message and everything after it
+// are undone": the boundary message itself was re-issued as a fresh prompt, so it is
+// dropped from the view. Everything created strictly before the boundary is context,
+// and anything created at/after the staging time is the continuation after undo.
+// The durable rows are never touched, so Redo (unrevert) can restore them.
+//
+// Without revert.time (pre-marker sessions) the boundary falls back to a pure id
+// comparison: keep everything before the boundary message, drop it and the rest.
+export function filterRevert(msgs: WithParts[], revert?: { messageID: MessageID; time?: number }) {
+  if (!revert) return msgs
+  if (revert.time === undefined) {
+    const index = msgs.findIndex((msg) => msg.info.id === revert.messageID)
+    if (index < 0) return []
+    return msgs.slice(0, index)
+  }
+  const boundary = msgs.find((msg) => msg.info.id === revert.messageID)
+  if (!boundary) return []
+  const boundaryCreated = boundary.info.time.created
+  const candid: WithParts[] = []
+  for (const msg of msgs) {
+    const created = msg.info.time.created
+    if (created < boundaryCreated || created >= revert.time) candid.push(msg)
+  }
+  return candid
+}
+
 // filterCompacted reorders messages for model consumption
 // ([compaction-user, summary, ...retained tail..., continue-user]), so array
 // position is not chronological. IDs are only a deterministic tie-breaker

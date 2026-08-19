@@ -215,8 +215,15 @@ export function Session() {
   const messagesBeforeRevert = () => {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
-    const index = messages().findIndex((message) => message.id === messageID)
-    return index === -1 ? messages() : messages().slice(0, index)
+    const revertTime = session()?.revert?.time
+    if (revertTime === undefined) {
+      const index = messages().findIndex((message) => message.id === messageID)
+      return index === -1 ? messages() : messages().slice(0, index)
+    }
+    const boundary = messages().find((message) => message.id === messageID)
+    if (!boundary) return messages()
+    const boundaryCreated = boundary.time.created
+    return messages().filter((message) => message.time.created < boundaryCreated)
   }
   const foregroundTasks = createMemo(() =>
     sync.data.capabilities.experimentalBackgroundSubagents
@@ -1205,11 +1212,24 @@ export function Session() {
   const revertRevertedMessages = createMemo(() => {
     const messageID = revertMessageID()
     if (!messageID) return []
-    const index = revertMessageIndex()
-    if (index === -1) return []
-    return messages()
-      .slice(index)
-      .filter((message) => message.role === "user")
+    const info = revertInfo()
+    if (info?.time === undefined) {
+      const index = revertMessageIndex()
+      if (index === -1) return []
+      return messages()
+        .slice(index)
+        .filter((message) => message.role === "user")
+    }
+    const boundary = messages().find((message) => message.id === messageID)
+    if (!boundary) return []
+    const boundaryCreated = boundary.time.created
+    const revertTime = info.time
+    return messages().filter(
+      (message) =>
+        message.role === "user" &&
+        message.time.created >= boundaryCreated &&
+        message.time.created < revertTime,
+    )
   })
 
   const revert = createMemo(() => {
@@ -1218,10 +1238,18 @@ export function Session() {
     if (!info.messageID) return
     return {
       messageID: info.messageID,
+      time: info.time,
       reverted: revertRevertedMessages(),
       diff: info.diff,
       diffFiles: revertDiffFiles(),
     }
+  })
+
+  const revertBoundaryCreated = createMemo(() => {
+    const messageID = revertMessageID()
+    if (!messageID) return null
+    const boundary = messages().find((m) => m.id === messageID)
+    return boundary?.time.created ?? null
   })
 
   // snap to bottom when session changes
@@ -1333,7 +1361,13 @@ export function Session() {
                         })()}
                       </Match>
                       <Match
-                        when={revert()?.messageID && revertMessageIndex() !== -1 && index() >= revertMessageIndex()}
+                        when={
+                          revert()?.messageID &&
+                          revertMessageIndex() !== -1 &&
+                          (revert()?.time !== undefined && revertBoundaryCreated() !== null
+                            ? message.time.created >= revertBoundaryCreated()! && message.time.created < revert()!.time!
+                            : index() >= revertMessageIndex())
+                        }
                       >
                         <></>
                       </Match>
