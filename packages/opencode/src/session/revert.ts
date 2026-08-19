@@ -103,14 +103,17 @@ const layer = Layer.effect(
     // a boundary marker: undo (revert) means "stop treating messages after the
     // revert point as part of the current context", not "delete them".
     //
-    // This deliberately does nothing: it never calls removeMessage/removePart and it
-    // never clears the marker on its own. A stale revert marker persisted on the
-    // session row must not be able to silently wipe (or even silently clear) the
-    // conversation when the next prompt/tool runs after a client restart. The model
-    // view is reconciled against the revert boundary in the prompt loop, and the
-    // marker is cleared only by an explicit, user-confirmed resolution (unrevert/redo).
-    const cleanup = Effect.fn("SessionRevert.cleanup")(function* (_session: Session.Info) {
-      return
+    // This clears the revert marker but never calls removeMessage/removePart — the
+    // reverted messages remain durably stored in the database. The marker must be
+    // cleared here because filterRevert (applied in the prompt loop) uses time-based
+    // boundaries: if the stale marker persists across multiple prompt loops, all new
+    // messages are created >= revert.time and pass through the filter, creating an
+    // infinite feed-forward loop where the LLM processes its own output repeatedly.
+    // Clearing the marker after the loop completes prevents this while keeping the
+    // messages intact for unrevert/redo recovery.
+    const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {
+      if (!session.revert) return
+      yield* sessions.clearRevert(session.id)
     })
 
     return Service.of({ revert, unrevert, cleanup })
