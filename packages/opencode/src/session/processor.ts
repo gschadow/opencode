@@ -70,8 +70,30 @@ interface ProcessorContext extends Input {
   snapshot: string | undefined
   blocked: boolean
   needsCompaction: boolean
+  degenerate: boolean
+  degeneratePartID: string | undefined
+  degenerateCheckedLen: number
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+}
+
+// Reasoning models occasionally fall into repetition loops ("Let me do it. Let
+// me act. Let me do it. ...") that burn tokens until the gateway kills the
+// stream. Detect a long verbatim repetition in the reasoning tail and abort the
+// stream early so the prompt loop can retry the turn.
+const DEGENERATE_WINDOW = 200
+const DEGENERATE_REPEATS = 4
+const DEGENERATE_CHECK_INTERVAL = 512
+function isDegenerateRepetition(text: string) {
+  if (text.length < DEGENERATE_WINDOW * DEGENERATE_REPEATS) return false
+  const needle = text.slice(-DEGENERATE_WINDOW)
+  let count = 0
+  let index = 0
+  while (count < DEGENERATE_REPEATS && (index = text.indexOf(needle, index)) !== -1) {
+    count++
+    index += DEGENERATE_WINDOW
+  }
+  return count >= DEGENERATE_REPEATS
 }
 
 type StreamEvent = LLMEvent
@@ -109,6 +131,9 @@ const layer = Layer.effect(
         snapshot: initialSnapshot,
         blocked: false,
         needsCompaction: false,
+        degenerate: false,
+        degeneratePartID: undefined,
+        degenerateCheckedLen: 0,
         currentText: undefined,
         reasoningMap: {},
       }
@@ -279,6 +304,8 @@ const layer = Layer.effect(
         switch (value.type) {
           case "reasoning-start":
             if (value.id in ctx.reasoningMap) return
+            ctx.degeneratePartID = value.id
+            ctx.degenerateCheckedLen = 0
             ctx.reasoningMap[value.id] = {
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -296,6 +323,20 @@ const layer = Layer.effect(
             if (!(value.id in ctx.reasoningMap)) return
             ctx.reasoningMap[value.id].text += value.text
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
+            if (
+              !ctx.degenerate &&
+              value.id === ctx.degeneratePartID &&
+              ctx.reasoningMap[value.id].text.length >= ctx.degenerateCheckedLen + DEGENERATE_CHECK_INTERVAL
+            ) {
+              ctx.degenerateCheckedLen = ctx.reasoningMap[value.id].text.length
+              if (isDegenerateRepetition(ctx.reasoningMap[value.id].text)) {
+                ctx.degenerate = true
+                yield* Effect.logWarning("degenerate reasoning loop detected, aborting stream", {
+                  "session.id": ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                })
+              }
+            }
             yield* session.updatePartDelta({
               sessionID: ctx.reasoningMap[value.id].sessionID,
               messageID: ctx.reasoningMap[value.id].messageID,
@@ -641,9 +682,16 @@ const layer = Layer.effect(
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),
-              Stream.takeUntil(() => ctx.needsCompaction),
+              Stream.takeUntil(() => ctx.needsCompaction || ctx.degenerate),
               Stream.runDrain,
             )
+            // Surface a degenerate abort like a stream that ended without a stop
+            // reason: the message is dropped from the next request and the prompt
+            // loop retries the turn.
+            if (ctx.degenerate && !ctx.assistantMessage.finish) {
+              ctx.assistantMessage.finish = "unknown"
+              yield* session.updateMessage(ctx.assistantMessage)
+            }
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {

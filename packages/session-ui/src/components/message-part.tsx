@@ -1689,12 +1689,20 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
     })
   })
 
+  const timestamp = createMemo(() => {
+    if (props.message.role !== "assistant") return ""
+    const message = props.message as AssistantMessage
+    if (typeof message.time.created !== "number") return ""
+    return new Intl.DateTimeFormat(i18n.locale(), { timeStyle: "short" }).format(message.time.created)
+  })
+
   const meta = createMemo(() => {
     if (props.message.role !== "assistant") return ""
     const agent = (props.message as AssistantMessage).agent
     const items = [
       agent ? agent[0]?.toUpperCase() + agent.slice(1) : "",
       model(),
+      timestamp(),
       duration(),
       interrupted() ? i18n.t("ui.message.interrupted") : "",
     ]

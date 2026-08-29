@@ -6,6 +6,7 @@ import type { TextareaRenderable } from "@opentui/core"
 import { useTheme, selectedForeground } from "../../context/theme"
 import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
+import { useExit } from "../../context/exit"
 import { SplitBorder } from "../../ui/border"
 import { useSync } from "../../context/sync"
 import { useProject } from "../../context/project"
@@ -133,6 +134,10 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
 
   const { theme } = useTheme()
 
+  function clearRequest() {
+    sync.set("permission", props.request.sessionID, [])
+  }
+
   return (
     <Switch>
       <Match when={store.stage === "always"}>
@@ -170,7 +175,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               requestID: props.request.id,
               directory: props.directory,
               workspace: project.workspace.current(),
-            })
+            }).catch(() => clearRequest())
           }}
         />
       </Match>
@@ -183,7 +188,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               directory: props.directory,
               message: message || undefined,
               workspace: project.workspace.current(),
-            })
+            }).catch(() => clearRequest())
           }}
           onCancel={() => {
             setStore("stage", "permission")
@@ -420,7 +425,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     requestID: props.request.id,
                     directory: props.directory,
                     workspace: project.workspace.current(),
-                  })
+                  }).catch(() => clearRequest())
                   return
                 }
                 void sdk.client.permission.reply({
@@ -428,7 +433,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                   requestID: props.request.id,
                   directory: props.directory,
                   workspace: project.workspace.current(),
-                })
+                }).catch(() => clearRequest())
               }}
             />
           )
@@ -533,6 +538,7 @@ function Prompt<const T extends Record<string, string>>(props: {
 }) {
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
+  const exit = useExit()
   const dimensions = useTerminalDimensions()
   const keys = Object.keys(props.options) as (keyof T)[]
   const [store, setStore] = createStore({
@@ -547,11 +553,10 @@ function Prompt<const T extends Record<string, string>>(props: {
     commands: [
       {
         name: "app.exit",
-        title: "Reject permission",
+        title: "Exit the app",
         category: "Permission",
         run() {
-          if (!props.escapeKey) return
-          props.onSelect(props.escapeKey)
+          exit()
         },
       },
       {

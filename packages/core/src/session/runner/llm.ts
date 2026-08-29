@@ -45,6 +45,19 @@ import { makeLocationNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
 
 /**
+ * Loop-detection signature for one tool call: `name(serializedInput)`. The input
+ * distinguishes calls that share a tool name but do different work — two `bash`
+ * calls with different curl URLs or sqlite3 queries are different targets, not a
+ * loop. Long inputs are sampled head/tail so pagination-style calls that differ
+ * only at the end are not falsely seen as identical.
+ */
+const toolCallSignature = (name: string, input: unknown): string => {
+  const str = typeof input === "string" ? input : (JSON.stringify(input) ?? String(input))
+  const value = str.length > 80 ? `hash:${str.length}:${str.slice(0, 20)}:${str.slice(-20)}` : str
+  return `${name}(${value})`
+}
+
+/**
  * Runs one durable coding-agent Session until it settles.
  *
  * Keep this as orchestration over smaller collaborators rather than rebuilding the legacy
@@ -191,7 +204,10 @@ const layer = Layer.effect(
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
-      const toolNames: string[] = []
+      // Per-tool-call loop signatures: name + serialized input. A loop means doing
+      // almost the same thing repeatedly, so two bash calls with different URLs or
+      // queries are different work and must not collide on the bare tool name.
+      const toolSigs: string[] = []
       if (promotion) {
         const cutoff = yield* EventV2.latestSequence(db, session.id)
         let promoted = 0
@@ -251,7 +267,7 @@ const layer = Layer.effect(
             }
             yield* publish(event)
             if (event.type !== "tool-call" || event.providerExecuted) return
-            toolNames.push(event.name)
+            toolSigs.push(toolCallSignature(event.name, event.input))
             if (!toolMaterialization) {
               yield* withPublication(publisher.failUnsettledTools("Tools are disabled"))
               return
@@ -353,11 +369,11 @@ const layer = Layer.effect(
           if (stream._tag === "Failure") return yield* Effect.failCause(stream.cause)
           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
             return yield* Effect.failCause(settled.cause)
-          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep, toolNames }
+          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep, toolSigs }
         }),
       )
     }, Effect.scoped)
-    type RunTurnResult = { readonly needsContinuation: boolean; readonly step: number; readonly toolNames: string[] }
+    type RunTurnResult = { readonly needsContinuation: boolean; readonly step: number; readonly toolSigs: string[] }
     type RunTurn = (
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
@@ -414,6 +430,7 @@ const layer = Layer.effect(
         | undefined
       const maxCost = sessionBudget?.maxCost ?? budget?.maxCost
       const loopDetectionThreshold = sessionBudget?.loopDetectionThreshold ?? budget?.loopDetectionThreshold
+      const exemptRegex = budget?.loopDetectionExemptTools ? new RegExp(budget.loopDetectionExemptTools) : undefined
       let loopState = LoopDetector.create()
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
       let shouldRun = input.force || hasSteer || hasQueue
@@ -426,8 +443,11 @@ const layer = Layer.effect(
           needsContinuation = result.needsContinuation
           step = result.step + 1
           promotion = "steer"
-          if (result.toolNames.length > 0) {
-            loopState = LoopDetector.record(loopState, result.toolNames.join(","))
+          const loopSigs = exemptRegex
+            ? result.toolSigs.filter((sig) => !exemptRegex.test(sig.slice(0, sig.indexOf("("))))
+            : result.toolSigs
+          if (loopSigs.length > 0) {
+            loopState = LoopDetector.record(loopState, loopSigs.join(","))
           } else {
             loopState = LoopDetector.reset(loopState)
           }

@@ -220,6 +220,7 @@ export type Session = {
     partID?: string
     snapshot?: string
     diff?: string
+    time?: number | "-Infinity" | "Infinity" | "NaN"
   }
 }
 

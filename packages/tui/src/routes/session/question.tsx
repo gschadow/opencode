@@ -5,6 +5,8 @@ import type { TextareaRenderable } from "@opentui/core"
 import { selectedForeground, tint, useTheme } from "../../context/theme"
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
+import { useSync } from "../../context/sync"
+import { useExit } from "../../context/exit"
 import { SplitBorder } from "../../ui/border"
 import { useTuiConfig } from "../../config"
 import { useBindings, useOpencodeModeStack } from "../../keymap"
@@ -13,6 +15,8 @@ const QUESTION_MODE = "question"
 
 export function QuestionPrompt(props: { request: QuestionRequest; directory?: string }) {
   const sdk = useSDK()
+  const sync = useSync()
+  const exit = useExit()
   const { theme } = useTheme()
   const renderer = useRenderer()
   const tuiConfig = useTuiConfig()
@@ -45,20 +49,24 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
     return store.answers[store.tab]?.includes(value) ?? false
   })
 
+  function clearRequest() {
+    sync.set("question", props.request.sessionID, [])
+  }
+
   function submit() {
     const answers = questions().map((_, i) => store.answers[i] ?? [])
     void sdk.client.question.reply({
       requestID: props.request.id,
       directory: props.directory,
       answers,
-    })
+    }).catch(() => clearRequest())
   }
 
   function reject() {
     void sdk.client.question.reject({
       requestID: props.request.id,
       directory: props.directory,
-    })
+    }).catch(() => clearRequest())
   }
 
   function pick(answer: string, custom: boolean = false) {
@@ -217,10 +225,10 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
       commands: [
         {
           name: "app.exit",
-          title: "Reject question",
+          title: "Exit the app",
           category: "Question",
           run() {
-            reject()
+            exit()
           },
         },
       ],

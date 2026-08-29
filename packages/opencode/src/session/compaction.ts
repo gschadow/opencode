@@ -95,6 +95,12 @@ function summaryText(message: SessionV1.WithParts) {
   return text || undefined
 }
 
+function isSummaryToolCallError(error: SessionV1.Assistant["error"]) {
+  if (!error || error.name !== "UnknownError") return false
+  const message = (error.data as { message?: unknown }).message
+  return typeof message === "string" && message.startsWith("Tool call not allowed while generating summary")
+}
+
 function completedCompactions(messages: SessionV1.WithParts[]) {
   const users = new Map<MessageID, number>()
   for (let i = 0; i < messages.length; i++) {
@@ -386,59 +392,74 @@ const layer = Layer.effect(
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
       const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const ctx = yield* InstanceState.context
-      const msg: SessionV1.Assistant = {
-        id: MessageID.ascending(),
-        role: "assistant",
-        parentID: input.parentID,
-        sessionID: input.sessionID,
-        mode: "compaction",
-        agent: "compaction",
-        variant: userMessage.model.variant,
-        summary: true,
-        path: {
-          cwd: ctx.directory,
-          root: ctx.worktree,
-        },
-        cost: 0,
-        tokens: {
-          output: 0,
-          input: 0,
-          reasoning: 0,
-          cache: { read: 0, write: 0 },
-        },
-        modelID: model.id,
-        providerID: model.providerID,
-        time: {
-          created: Date.now(),
-        },
-      }
-      yield* session.updateMessage(msg)
-      const processor = yield* processors.create({
-        assistantMessage: msg,
-        sessionID: input.sessionID,
-        model,
-      })
-      const result = yield* processor.process({
-        user: userMessage,
-        agent,
-        sessionID: input.sessionID,
-        tools: {},
-        system: [],
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: [nextPrompt, "The following is the conversation history:", conversation]
-                  .filter(Boolean)
-                  .join("\n\n"),
-              },
-            ],
+      const summaryAttempt = Effect.fnUntraced(function* () {
+        const msg: SessionV1.Assistant = {
+          id: MessageID.ascending(),
+          role: "assistant",
+          parentID: input.parentID,
+          sessionID: input.sessionID,
+          mode: "compaction",
+          agent: "compaction",
+          variant: userMessage.model.variant,
+          summary: true,
+          path: {
+            cwd: ctx.directory,
+            root: ctx.worktree,
           },
-        ],
-        model,
+          cost: 0,
+          tokens: {
+            output: 0,
+            input: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          modelID: model.id,
+          providerID: model.providerID,
+          time: {
+            created: Date.now(),
+          },
+        }
+        yield* session.updateMessage(msg)
+        const processor = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: input.sessionID,
+          model,
+        })
+        const result = yield* processor.process({
+          user: userMessage,
+          agent,
+          sessionID: input.sessionID,
+          tools: {},
+          system: [],
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: [nextPrompt, "The following is the conversation history:", conversation]
+                    .filter(Boolean)
+                    .join("\n\n"),
+                },
+              ],
+            },
+          ],
+          model,
+        })
+        return { processor, result }
       })
+      // The serialized history is full of tool usage, so the summary model
+      // occasionally issues a tool call instead of summarizing. Retry the
+      // summary a couple of times before giving up.
+      let attempt = yield* summaryAttempt()
+      for (let retries = 0; retries < 2 && isSummaryToolCallError(attempt.processor.message.error); retries++) {
+        yield* Effect.logWarning("compaction summary issued a tool call, retrying", {
+          sessionID: input.sessionID,
+          attempt: retries + 1,
+        })
+        attempt = yield* summaryAttempt()
+      }
+      const { processor, result } = attempt
 
       if (result === "compact") {
         processor.message.error = new SessionV1.ContextOverflowError({

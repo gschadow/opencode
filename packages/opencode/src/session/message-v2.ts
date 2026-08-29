@@ -245,15 +245,14 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
       const media: Array<{ mime: string; url: string; filename?: string }> = []
 
-      if (
-        msg.info.error &&
-        !(
-          AbortedError.isInstance(msg.info.error) &&
-          msg.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
-        )
-      ) {
+      const hasRenderableContent = msg.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
+      if (msg.info.error && !(AbortedError.isInstance(msg.info.error) && hasRenderableContent)) {
         continue
       }
+      // Streams that ended without a stop reason (finish "unknown") and produced
+      // only reasoning would render as empty assistant messages that providers
+      // reject. Drop them from the request; the prompt loop retries the turn.
+      if (msg.info.finish === "unknown" && !hasRenderableContent) continue
       const assistantMessage: UIMessage = {
         id: msg.info.id,
         role: "assistant",

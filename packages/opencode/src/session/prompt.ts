@@ -100,6 +100,29 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   return part.state.status === "error" && part.state.metadata?.interrupted === true
 }
 
+// "BTW: " messages are context injections that never become the active user of a
+// turn. User messages without text parts are treated the same way — except
+// compaction/subtask messages, which carry loop tasks and must be processed.
+function isBtwOnly(msg: SessionV1.WithParts) {
+  if (msg.parts.some((part) => part.type === "compaction" || part.type === "subtask")) return false
+  return msg.parts.every((part) => part.type !== "text" || !part.text || part.text.startsWith("BTW: "))
+}
+
+function latestActiveUser(msgs: SessionV1.WithParts[]) {
+  let result: SessionV1.User | undefined
+  for (const msg of msgs) {
+    const info = msg.info
+    if (info.role !== "user" || isBtwOnly(msg)) continue
+    if (
+      !result ||
+      info.time.created > result.time.created ||
+      (info.time.created === result.time.created && info.id > result.id)
+    )
+      result = info
+  }
+  return result
+}
+
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
@@ -1215,6 +1238,7 @@ const layer = Layer.effect(
         let loopState = LoopDetector.create()
         let targetLoopState = LoopDetector.create()
         let recentlyCompacted = false
+        let emptyTurns = 0
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1229,6 +1253,13 @@ const layer = Layer.effect(
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
 
+          // Adopt the latest substantive user message on every iteration. Messages
+          // can arrive while the loop is running; responses must be parented to the
+          // newest one, otherwise the exit condition below can never be satisfied
+          // again and the loop re-prompts forever. BTW-only messages are context
+          // injections and never become the active user.
+          const activeUser = latestActiveUser(msgs)
+          if (activeUser) effectiveUser = activeUser
           if (!effectiveUser) effectiveUser = lastUser
           const user = effectiveUser
 
@@ -1247,21 +1278,50 @@ const layer = Layer.effect(
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastAssistant.parentID === lastUser.id
+            lastAssistant.parentID === user.id
           ) {
-            const orphan = lastAssistantMsg?.parts.find(
-              (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
-            )
-            if (orphan) {
-              yield* Effect.logWarning("loop exit with orphaned interrupted tool", {
+            const hasContent =
+              lastAssistantMsg?.parts.some((part) => part.type === "text" || part.type === "tool") ?? false
+            const hasToolPart = lastAssistantMsg?.parts.some((part) => part.type === "tool") ?? false
+            // Degenerate completion: the stream ended ("stop"/"unknown") without doing
+            // any work — no tool calls and only a trivial text fragment (e.g. a single
+            // word like "Now"). The provider finished mid-thought; re-stream instead of
+            // silently ending the turn. Bounded by emptyTurns to avoid a hang.
+            const textContent = (lastAssistantMsg?.parts ?? [])
+              .filter((part): part is SessionV1.TextPart => part.type === "text")
+              .map((part) => part.text)
+              .join("")
+              .trim()
+            const degenerate =
+              !hasToolPart &&
+              textContent.length < 32 &&
+              (lastAssistant.finish === "unknown" || lastAssistant.finish === "stop")
+            if (hasContent && !degenerate) emptyTurns = 0
+            const retryEmpty = degenerate && emptyTurns < 3
+            if (retryEmpty) {
+              emptyTurns++
+              yield* Effect.logWarning("degenerate completion, retrying", {
                 "session.id": sessionID,
                 messageID: lastAssistant.id,
-                tool: orphan.tool,
-                callID: orphan.callID,
+                finish: lastAssistant.finish,
+                attempt: emptyTurns,
               })
             }
-            yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
-            break
+            if (!retryEmpty) {
+              const orphan = lastAssistantMsg?.parts.find(
+                (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
+              )
+              if (orphan) {
+                yield* Effect.logWarning("loop exit with orphaned interrupted tool", {
+                  "session.id": sessionID,
+                  messageID: lastAssistant.id,
+                  tool: orphan.tool,
+                  callID: orphan.callID,
+                })
+              }
+              yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
+              break
+            }
           }
 
           step++
@@ -1377,9 +1437,14 @@ const layer = Layer.effect(
                   const args = Object.entries(input)
                     .filter(([, v]) => v !== undefined && v !== null && v !== "")
                     .map(([k, v]) => {
-                      const str = typeof v === "string" ? v : String(v)
-                      // Hash long arguments to avoid false positives from truncation
-                      const value = str.length > 80 ? `hash:${str.length}:${str.slice(0, 20)}` : str
+                      // JSON.stringify so object/array arguments are distinguished
+                      // (String() collapses them all to "[object Object]").
+                      const str = typeof v === "string" ? v : (JSON.stringify(v) ?? String(v))
+                      // Hash long arguments to avoid false positives from truncation.
+                      // Sample head and tail so pagination-style commands that only
+                      // differ at the end (offset/limit) are not seen as identical.
+                      const value =
+                        str.length > 80 ? `hash:${str.length}:${str.slice(0, 20)}:${str.slice(-20)}` : str
                       return `${k}:${value}`
                     })
                     .sort()
@@ -1388,14 +1453,26 @@ const layer = Layer.effect(
                 })
               exactSig = exactSigs.length === 1 ? exactSigs[0] : exactSigs.slice().sort().join("+")
               
-              // Target signature: tool + primary target (file/command/query)
+              // Target signature: tool + primary target (file/command/query).
+              // A loop means doing almost the same thing repeatedly, so a command's
+              // target must capture its primary operand (URL, file, db) plus a sample
+              // of the remainder — not just the binary name. 10 different curl URLs
+              // or sqlite3 queries are different work, not a loop.
               const targetSigs = toolParts
                 .filter((p) => !exemptRegex || !exemptRegex.test(p.tool))
                 .map((p) => {
                   const input = p.state.status === "pending" || p.state.status === "running" || p.state.status === "completed" || p.state.status === "error" ? p.state.input : {}
                   let target = ""
                   if (input.filePath) target = String(input.filePath)
-                  else if (input.command) target = String(input.command).split(/\s+/)[0] // first word only
+                  else if (input.command) {
+                    const cmd = String(input.command)
+                    const tokens = cmd.trim().split(/\s+/)
+                    const binary = tokens[0] ?? ""
+                    const primary = tokens.slice(1).find((t) => t.length > 0 && !t.startsWith("-")) ?? ""
+                    const rest = primary.length > 0 ? cmd.slice(cmd.indexOf(primary) + primary.length).trim() : ""
+                    const restPart = rest.length > 60 ? `hash:${rest.length}:${rest.slice(0, 20)}:${rest.slice(-20)}` : rest
+                    target = [binary, primary, restPart].filter(Boolean).join(" ")
+                  }
                   else if (input.query) target = String(input.query).slice(0, 40)
                   else if (input.pattern) target = String(input.pattern).slice(0, 40)
                   return `${p.tool}(${target})`
@@ -1716,13 +1793,14 @@ const layer = Layer.effect(
           yield* Effect.logInfo("loop: no user or assistant", { "session.id": input.sessionID })
           break
         }
-        if (latestUser.id <= latestAssistant.id) {
+        // Pending work is determined structurally: does the latest substantive user
+        // message have an assistant response? ID comparison breaks when assistant
+        // messages were created after a user message arrived mid-loop.
+        const activeUser = latestActiveUser(after)
+        const responded =
+          activeUser && after.some((m) => m.info.role === "assistant" && m.info.parentID === activeUser.id)
+        if (!activeUser || responded) {
           yield* Effect.logInfo("loop: no pending", { "session.id": input.sessionID })
-          break
-        }
-        const parts = after.find((m) => m.info.id === latestUser.id)?.parts ?? []
-        if (parts.every((p) => p.type !== "text" || !p.text || p.text.startsWith("BTW: "))) {
-          yield* Effect.logInfo("loop: pending is btw", { "session.id": input.sessionID })
           break
         }
         yield* Effect.logInfo("loop: chaining pending", { "session.id": input.sessionID })

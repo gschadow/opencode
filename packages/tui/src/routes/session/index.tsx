@@ -216,7 +216,7 @@ export function Session() {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
     const revertTime = session()?.revert?.time
-    if (revertTime === undefined) {
+    if (typeof revertTime !== "number") {
       const index = messages().findIndex((message) => message.id === messageID)
       return index === -1 ? messages() : messages().slice(0, index)
     }
@@ -1212,8 +1212,8 @@ export function Session() {
   const revertRevertedMessages = createMemo(() => {
     const messageID = revertMessageID()
     if (!messageID) return []
-    const info = revertInfo()
-    if (info?.time === undefined) {
+    const revertTime = revertInfo()?.time
+    if (typeof revertTime !== "number") {
       const index = revertMessageIndex()
       if (index === -1) return []
       return messages()
@@ -1223,7 +1223,6 @@ export function Session() {
     const boundary = messages().find((message) => message.id === messageID)
     if (!boundary) return []
     const boundaryCreated = boundary.time.created
-    const revertTime = info.time
     return messages().filter(
       (message) =>
         message.role === "user" &&
@@ -1250,6 +1249,11 @@ export function Session() {
     if (!messageID) return null
     const boundary = messages().find((m) => m.id === messageID)
     return boundary?.time.created ?? null
+  })
+
+  const revertTimeValue = createMemo(() => {
+    const t = revertInfo()?.time
+    return typeof t === "number" ? t : null
   })
 
   // snap to bottom when session changes
@@ -1364,8 +1368,8 @@ export function Session() {
                         when={
                           revert()?.messageID &&
                           revertMessageIndex() !== -1 &&
-                          (revert()?.time !== undefined && revertBoundaryCreated() !== null
-                            ? message.time.created >= revertBoundaryCreated()! && message.time.created < revert()!.time!
+                          (revertTimeValue() !== null && revertBoundaryCreated() !== null
+                            ? message.time.created >= revertBoundaryCreated()! && message.time.created < revertTimeValue()!
                             : index() >= revertMessageIndex())
                         }
                       >
