@@ -23,3 +23,10 @@ class GlobalBusEmitter extends EventEmitter<{
 }
 
 export const GlobalBus = new GlobalBusEmitter()
+
+// This deployment routinely has a dozen+ concurrent SSE subscribers (attach
+// TUIs, Telegram bot, voice daemon, subagents), each registering one GlobalBus
+// "event" listener. The default max (10) fires spurious MaxListenersExceeded
+// warnings. Memory is bounded per connection by the sliding queues in the SSE
+// handlers (global.ts / event.ts), so a high listener cap is safe here.
+GlobalBus.setMaxListeners(100)

@@ -9,6 +9,13 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
 
+// Per-SSE-connection event buffer. A client that stops consuming (orphaned
+// attach TUI, crashed bot) used to accumulate every session event forever —
+// each event can be MB-scale (message diffs) and the process was OOM-killed at
+// 117.5G. Sliding keeps only the newest events, so a stalled connection costs
+// at most a few MB instead of growing without bound.
+const EVENT_STREAM_CAPACITY = 5000
+
 function eventData(data: unknown): Sse.Event {
   return {
     _tag: "Event",
@@ -28,7 +35,7 @@ function eventResponse(events: EventV2.Interface) {
     const workspaceID = yield* InstanceState.workspaceID
     // Listener registration is eager, so events published after this point cannot
     // be lost while the HTTP body fiber is starting or emitting server.connected.
-    const queue = yield* Queue.unbounded<EventV2.Payload>()
+    const queue = yield* Queue.sliding<EventV2.Payload>(EVENT_STREAM_CAPACITY)
     const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)))
     yield* Effect.addFinalizer(() => unsubscribe)
     const stream = Stream.fromQueue(queue).pipe(

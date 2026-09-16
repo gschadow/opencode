@@ -22,16 +22,21 @@ function eventData(data: unknown): Sse.Event {
   }
 }
 
+// See EVENT_STREAM_CAPACITY in event.ts: a stalled SSE consumer must not be able
+// to grow an unbounded event buffer forever. Sliding keeps the newest events and
+// drops the oldest, so a dead connection costs only this many retained events.
+const GLOBAL_EVENT_STREAM_CAPACITY = 5000
+
 function eventResponse() {
   return Effect.gen(function* () {
     yield* Effect.logInfo("global event connected")
-    const events = Stream.callback<GlobalBusEvent>((queue) => {
-      const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
-      return Effect.acquireRelease(
-        Effect.sync(() => GlobalBus.on("event", handler)),
-        () => Effect.sync(() => GlobalBus.off("event", handler)),
-      )
-    })
+    const queue = yield* Queue.sliding<GlobalBusEvent>(GLOBAL_EVENT_STREAM_CAPACITY)
+    const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+    yield* Effect.acquireRelease(
+      Effect.sync(() => GlobalBus.on("event", handler)),
+      () => Effect.sync(() => GlobalBus.off("event", handler)),
+    )
+    const events = Stream.fromQueue(queue)
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
       Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
