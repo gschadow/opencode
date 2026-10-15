@@ -486,6 +486,30 @@ const layer = Layer.effect(
         })
       }
 
+      if (result === "continue" && !processor.message.error) {
+        // Compaction itself never sends the reduced context to a provider, so the
+        // summary call's usage describes the head that was summarized - not the new
+        // working set. Until the next provider turn there is no measured value for
+        // the compacted context, which makes every usage-derived size (TUI sidebar,
+        // telegram bot) report the stale pre-compaction peak. Record the estimated
+        // post-compaction context on the summary message so clients show the new
+        // size immediately. The summary call's real usage stays on its step-finish
+        // part.
+        const retainedStart = selected.tail_start_id
+          ? history.findIndex((item) => item.info.id === selected.tail_start_id)
+          : 0
+        const retained = retainedStart > 0 ? history.slice(retainedStart) : history
+        const outputTokens = processor.message.tokens.output
+        const contextTokens = (yield* estimate({ messages: retained, model })) + outputTokens
+        processor.message.tokens = {
+          input: Math.max(0, contextTokens - outputTokens),
+          output: outputTokens,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        }
+        yield* session.updateMessage(processor.message)
+      }
+
       if (result === "continue" && input.auto) {
         if (replay) {
           const original = replay.info
