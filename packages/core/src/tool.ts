@@ -40,6 +40,14 @@ type Data = {
 
 export interface Interface extends State.Transformable<Editor> {
   readonly list: () => Effect.Effect<ReadonlyArray<Tool.Info & { readonly id: string }>>
+  /** Model-facing summaries (name, description, JSON input schema) for every registered tool. */
+  readonly describe: () => Effect.Effect<ReadonlyArray<Tool.Description>>
+  /** Run one registered tool by effective name outside the model loop (user-initiated invocation). */
+  readonly invoke: (
+    name: string,
+    input: unknown,
+    context: Tool.Context,
+  ) => Effect.Effect<NormalizedResult, Tool.Error>
   readonly snapshot: (permissions?: Permission.Ruleset) => Effect.Effect<Snapshot>
 }
 
@@ -222,6 +230,23 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
+      describe: Effect.fn("Tool.describe")(() =>
+        Effect.sync(() =>
+          Array.from(state.get().tools.values())
+            .map((tool) => ({
+              name: tool.id,
+              description: tool.description,
+              inputSchema: definition(tool).inputSchema,
+            }))
+            .toSorted((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0)),
+        ),
+      ),
+      invoke: Effect.fn("Tool.invoke")(function* (name: string, input: unknown, context: Tool.Context) {
+        const tool = state.get().tools.get(name)
+        if (!tool) return yield* new Tool.Error({ message: `No tool named "${name}" is available.` })
+        const event = yield* beforeExecute(name, input, context)
+        return yield* executeTool(tool, name, event.input, context)
+      }),
       snapshot: Effect.fn("Tool.snapshot")((permissions) =>
         Effect.sync(() => {
           const data = state.get()

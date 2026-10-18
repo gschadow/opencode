@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
+import { TestClock } from "effect/testing"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Form } from "@opencode/core/form"
@@ -19,6 +20,10 @@ const assertions: Permission.AssertInput[] = []
 let captured: Form.CreateInput | undefined
 let reject = false
 let deny = false
+// When `hang` is set the mocked form waits until `reply` records an answer, so a test can
+// drive the auto-answer deadline with TestClock instead of a real user reply.
+let hang = false
+let replied: Form.ReplyInput | undefined
 const capturedInput = () => captured
 const questionInput = {
   questions: [
@@ -46,17 +51,31 @@ const permission = permissionLayer({
     ),
 })
 const form = Layer.mock(Form.Service, {
-  ask: (input: Form.CreateInput) =>
+  create: (input: Form.CreateInput) =>
     Effect.sync(() => {
       captured = input
-    }).pipe(
-      Effect.andThen(
-        Effect.sync(
-          (): Form.TerminalState =>
-            reject ? { status: "cancelled" } : { status: "answered", answer: { q0: "Build", q1: ["Dev"] } },
-        ),
-      ),
-    ),
+      return {
+        id: input.id ?? Form.ID.create(),
+        sessionID: input.sessionID,
+        title: input.title,
+        ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+        fields: input.fields,
+      } satisfies Form.Info
+    }),
+  wait: () =>
+    Effect.gen(function* () {
+      if (!hang)
+        return (reject
+          ? { status: "cancelled" }
+          : { status: "answered", answer: { q0: "Build", q1: ["Dev"] } }) as Form.TerminalState
+      while (replied === undefined) yield* Effect.sleep("1 second")
+      return { status: "answered", answer: replied.answer } as const
+    }),
+  reply: (input: Form.ReplyInput) =>
+    Effect.sync(() => {
+      replied = input
+    }),
+  cancel: () => Effect.void,
 })
 const questionToolNode = makeLocationNode({
   name: "test/question-tool-plugin",
@@ -175,7 +194,7 @@ describe("QuestionTool", () => {
         metadata: { answers: [["Build"], ["Dev"], []] },
       })
       expect(assertions).toMatchObject([{ sessionID, action: "question", resources: ["*"] }])
-      expect(capturedInput()).toEqual({
+      expect(capturedInput()).toMatchObject({
         sessionID,
         title: "Questions",
         metadata: { kind: "question", tool: { messageID: toolIdentity.messageID, id: "call-question" } },
@@ -221,7 +240,7 @@ describe("QuestionTool", () => {
         ...toolIdentity,
         call: { type: "tool-call", id: "call-question", name: "question", input: questionInput },
       })
-      expect(capturedInput()).toEqual({
+      expect(capturedInput()).toMatchObject({
         sessionID,
         title: "Questions",
         metadata: { kind: "question", tool: { messageID: toolIdentity.messageID, id: "call-question" } },
@@ -258,6 +277,49 @@ describe("QuestionTool", () => {
         expect(error).toBeInstanceOf(QuestionTool.CancelledError)
         expect(error).toHaveProperty("message", "The user dismissed this question")
       }
+    }),
+  )
+
+  it.effect("auto-answers the recommended option after the unattended deadline", () =>
+    Effect.gen(function* () {
+      captured = undefined
+      replied = undefined
+      hang = true
+      reject = false
+      deny = false
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          hang = false
+          replied = undefined
+        }),
+      )
+      const registry = yield* Tool.Service
+      const fiber = yield* executeTool(registry, {
+        sessionID,
+        ...toolIdentity,
+        call: {
+          type: "tool-call",
+          id: "call-question-timeout",
+          name: "question",
+          input: {
+            questions: [
+              {
+                question: "Continue?",
+                header: "Continue",
+                options: [
+                  { label: "Yes (Recommended)", description: "Continue" },
+                  { label: "No", description: "Stop" },
+                ],
+              },
+            ],
+          },
+        },
+      }).pipe(Effect.forkScoped)
+
+      yield* TestClock.adjust("5 minutes")
+      const exit = yield* Fiber.await(fiber)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(replied).toMatchObject({ answer: { q0: "Yes (Recommended)" } })
     }),
   )
 })

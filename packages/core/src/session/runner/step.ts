@@ -62,6 +62,10 @@ interface Input {
 const TOOLS_INTERRUPTED = { type: "aborted", message: "Tool execution interrupted" } as const
 const STEP_INTERRUPTED = { type: "aborted", message: "Step interrupted" } as const
 const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not return a tool result" } as const
+const DEGENERATE_REPETITION = {
+  type: "degenerate",
+  message: "The model fell into a repetitive loop; the response was truncated and the step stopped.",
+} as const
 
 /** Captures Location-scoped dependencies without introducing another service or execution loop. */
 export const make = Effect.gen(function* () {
@@ -119,6 +123,11 @@ export const make = Effect.gen(function* () {
             return
           }
           yield* publisher.publish(event)
+          // A detected verbatim loop must stop the step before more tokens are billed.
+          if (publisher.isDegenerate()) {
+            yield* publisher.failAssistant(DEGENERATE_REPETITION)
+            return yield* Effect.interrupt
+          }
           if (event.type !== "tool-call" || event.providerExecuted) return
           toolRuns.push({
             call: event,
@@ -270,7 +279,12 @@ export const make = Effect.gen(function* () {
         )
           return Outcome.Continue({ error: llmError, decision: retry })
 
-        if (Exit.isFailure(stream)) return yield* Effect.failCause(stream.cause)
+        if (Exit.isFailure(stream)) {
+          // A degenerate loop aborts the provider stream on purpose; report the truncation
+          // as the step failure rather than surfacing the internal interruption.
+          if (publisher.isDegenerate()) return yield* new StepFailedError({ error: record.failure ?? DEGENERATE_REPETITION })
+          return yield* Effect.failCause(stream.cause)
+        }
         if (tools.declines.length > 0) {
           if (input.isLocationClosed()) return Outcome.Completed({ needsContinuation: true })
           return yield* Effect.interrupt

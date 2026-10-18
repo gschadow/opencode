@@ -415,6 +415,31 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         ...PermissionParams,
       },
     }),
+    Spec.make("attach", {
+      description: "Attach the interactive interface to an existing OpenCode server",
+      params: {
+        url: Argument.String("url").pipe(
+          Argument.withDescription("Server URL to attach to, for example http://127.0.0.1:4096"),
+          Argument.optional,
+        ),
+        directory: Argument.String("directory").pipe(
+          Argument.withDescription("Directory to start OpenCode in"),
+          Argument.optional,
+        ),
+        continue: Flag.Boolean("continue").pipe(
+          Flag.withAlias("c"),
+          Flag.withDescription("Continue the last session"),
+          Flag.withDefault(false),
+        ),
+        session: Flag.String("session").pipe(
+          Flag.withAlias("s"),
+          Flag.withDescription("Session ID to continue, or to create if it does not exist"),
+          Flag.optional,
+        ),
+        prompt: Flag.String("prompt").pipe(Flag.withDescription("Prompt to use"), Flag.optional),
+        ...PermissionParams,
+      },
+    }),
     Spec.make("session", {
       description: "Manage sessions",
       commands: [

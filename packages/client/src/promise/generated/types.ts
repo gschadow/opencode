@@ -244,6 +244,8 @@ export type ProjectCommands = { start?: string }
 
 export type ProjectTime = { created: number; updated: number; active: number; archived?: number }
 
+export type SecureInputID = string
+
 export type PermissionID = string
 
 export type PermissionSource = { type: "tool"; messageID: string; id: string }
@@ -723,6 +725,14 @@ export type Project = {
   commands?: ProjectCommands
   time: ProjectTime
   sandboxes: Array<string>
+}
+
+export type SecureInputRequest = {
+  id: SecureInputID
+  sessionID: SessionID
+  sessionName: string
+  prompt: string
+  command?: string
 }
 
 export type PermissionRequest = {
@@ -1730,6 +1740,33 @@ export type FormCancelled = {
   data: { id: FormID; sessionID: string }
 }
 
+export type SecureInputAsked = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "secure.input.asked"
+  location?: LocationRef
+  data: { id: SecureInputID; sessionID: SessionID; sessionName: string; prompt: string; command?: string }
+}
+
+export type SecureInputReplied = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "secure.input.replied"
+  location?: LocationRef
+  data: { sessionID: SessionID; requestID: SecureInputID }
+}
+
+export type SecureInputRejected = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "secure.input.rejected"
+  location?: LocationRef
+  data: { sessionID: SessionID; requestID: SecureInputID }
+}
+
 export type WebsearchUpdated = {
   id: EventID
   created: number
@@ -2255,6 +2292,7 @@ export type ConfigEntry =
           }
         }
         compaction?: { auto?: boolean; keep?: { tokens?: number }; buffer?: number }
+        budget?: { maxCost?: number; loopDetectionThreshold?: number; loopDetectionExemptTools?: string }
         skills?: Array<string>
         commands?: {
           [x: string]: {
@@ -2642,6 +2680,9 @@ export type V2Event =
   | FormCreated
   | FormReplied
   | FormCancelled
+  | SecureInputAsked
+  | SecureInputReplied
+  | SecureInputRejected
   | WebsearchUpdated
   | SessionStatusUpdated
   | SessionIdle
@@ -2846,6 +2887,10 @@ export type ProjectNotFoundError = {
 }
 export const isProjectNotFoundError = (value: unknown): value is ProjectNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ProjectNotFoundError"
+
+export type SecureInputNotFoundError = { readonly _tag: "SecureInputNotFoundError"; readonly message: string }
+export const isSecureInputNotFoundError = (value: unknown): value is SecureInputNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "SecureInputNotFoundError"
 
 export type PermissionNotFoundError = {
   readonly _tag: "PermissionNotFoundError"
@@ -6236,6 +6281,31 @@ export type FormListInput = {
 }
 
 export type FormListOutput = { location: LocationPublicRef; data: Array<FormInfo> }
+
+export type SecureInputRequestListInput = {
+  readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]
+}
+
+export type SecureInputRequestListOutput = { location: LocationPublicRef; data: Array<SecureInputRequest> }
+
+export type SecureInputListInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type SecureInputListOutput = { data: Array<SecureInputRequest> }["data"]
+
+export type SecureInputReplyInput = {
+  readonly sessionID: { readonly sessionID: string; readonly requestID: string }["sessionID"]
+  readonly requestID: { readonly sessionID: string; readonly requestID: string }["requestID"]
+  readonly value: { readonly value: string }["value"]
+}
+
+export type SecureInputReplyOutput = void
+
+export type SecureInputRejectInput = {
+  readonly sessionID: { readonly sessionID: string; readonly requestID: string }["sessionID"]
+  readonly requestID: { readonly sessionID: string; readonly requestID: string }["requestID"]
+}
+
+export type SecureInputRejectOutput = void
 
 export type PermissionRequestListInput = {
   readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]

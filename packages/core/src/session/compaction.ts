@@ -21,12 +21,15 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Context, Effect, Layer, Result, Stream } from "effect"
 import { Agent } from "../agent.js"
 import { Bus } from "../bus.js"
+import { Config } from "../config.js"
 import { Database } from "../database/database.js"
 import { llmClient } from "../effect/app-node-platform.js"
 import { Model } from "../model.js"
 import { State } from "../state.js"
 import { Token } from "../util/token.js"
 import type { SessionContext } from "./context.js"
+import { SessionBudget } from "./budget.js"
+import { SessionStore } from "./store.js"
 import { SessionEvent } from "./event.js"
 import { SessionHistory } from "./history.js"
 import type { SessionMessage } from "./message.js"
@@ -191,6 +194,7 @@ export const layer = Layer.effect(
     const models = yield* SessionRunnerModel.Service
     const db = (yield* Database.Service).db
     const requests = yield* SessionModelRequest.Service
+    const checkBudget = yield* SessionBudget.make
 
     const state = State.create<Settings, Editor>({
       name: "session-compaction",
@@ -426,7 +430,11 @@ export const layer = Layer.effect(
           })
         }
 
-        const attempt = yield* Effect.result(send(request))
+        const attempt = yield* checkBudget(context.session.id).pipe(
+          Effect.mapError((error): Failure => ({ error: error.error })),
+          Effect.andThen(() => send(request)),
+          Effect.result,
+        )
         if (Result.isSuccess(attempt)) return attempt.success
         const cause = attempt.failure
         if (!(cause instanceof AIError)) return yield* Effect.fail(cause)
@@ -509,12 +517,17 @@ export const layer = Layer.effect(
       })
     }
 
-    const stream = (context: SessionContext.Loaded, request: LLMRequest, options: StreamOptions) => {
+    const stream = Effect.fnUntraced(function* (
+      context: SessionContext.Loaded,
+      request: LLMRequest,
+      options: StreamOptions,
+    ) {
       const sessionID = context.session.id
       const metadataKey = context.model.model.route.providerMetadataKey ?? context.model.model.provider
       const unusable = (error: SessionError.Error) => Effect.fail<Failure>({ error })
 
-      return llm.stream(request, options).pipe(
+      yield* checkBudget(sessionID).pipe(Effect.mapError((error): Failure => ({ error: error.error })))
+      return yield* llm.stream(request, options).pipe(
         Stream.runFoldEffect(
           (): Streamed => ({ text: "" }),
           (streamed, event): Effect.Effect<Streamed, AIError | Failure> => {
@@ -568,7 +581,7 @@ export const layer = Layer.effect(
           },
         ),
       )
-    }
+    })
 
     /**
      * The conversation as the runner would send it, after request hooks.
@@ -683,7 +696,17 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Agent.node, Bus.node, Database.node, llmClient, Model.node, SessionModelRequest.node, SessionRunnerModel.node],
+  deps: [
+    Agent.node,
+    Bus.node,
+    Config.node,
+    Database.node,
+    llmClient,
+    Model.node,
+    SessionModelRequest.node,
+    SessionRunnerModel.node,
+    SessionStore.node,
+  ],
 })
 
 /** History loads from the latest completed compaction, so a previous one is always the first message. */

@@ -30,6 +30,7 @@ import type { Form } from "@opencode/schema/form"
 import type { Integration } from "@opencode/schema/integration"
 import type { Mcp } from "@opencode/schema/mcp"
 import type { Credential } from "@opencode/schema/credential"
+import type { SecureInput } from "@opencode/schema/secure-input"
 import type { PermissionSaved } from "@opencode/schema/permission-saved"
 import type { FileSystem } from "@opencode/schema/filesystem"
 import type { Command } from "@opencode/schema/command"
@@ -1710,6 +1711,46 @@ export interface FormApi<E = never> {
   readonly list: FormListOperation<E>
 }
 
+export type SecureInputRequestListInput = {
+  readonly location?: { readonly directory?: string | undefined } | undefined
+}
+export type SecureInputRequestListOutput = {
+  readonly location: Location.PublicRef
+  readonly data: ReadonlyArray<SecureInput.Request>
+}
+export type SecureInputRequestListOperation<E = never> = (
+  input?: SecureInputRequestListInput,
+) => Effect.Effect<SecureInputRequestListOutput, E>
+
+export type SecureInputListInput = { readonly sessionID: Session.ID }
+export type SecureInputListOutput = ReadonlyArray<SecureInput.Request>
+export type SecureInputListOperation<E = never> = (
+  input: SecureInputListInput,
+) => Effect.Effect<SecureInputListOutput, E>
+
+export type SecureInputReplyInput = {
+  readonly sessionID: Session.ID
+  readonly requestID: SecureInput.ID
+  readonly value: string
+}
+export type SecureInputReplyOutput = void
+export type SecureInputReplyOperation<E = never> = (
+  input: SecureInputReplyInput,
+) => Effect.Effect<SecureInputReplyOutput, E>
+
+export type SecureInputRejectInput = { readonly sessionID: Session.ID; readonly requestID: SecureInput.ID }
+export type SecureInputRejectOutput = void
+export type SecureInputRejectOperation<E = never> = (
+  input: SecureInputRejectInput,
+) => Effect.Effect<SecureInputRejectOutput, E>
+
+export interface SecureInputApi<E = never> {
+  readonly request: { readonly list: SecureInputRequestListOperation<E> }
+  readonly list: SecureInputListOperation<E>
+  readonly reply: SecureInputReplyOperation<E>
+  readonly reject: SecureInputRejectOperation<E>
+}
+
 export type PermissionRequestListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 export type PermissionRequestListOutput = {
   readonly location: Location.PublicRef
@@ -2299,6 +2340,7 @@ export interface AppApi<E = never> {
   readonly credential: CredentialApi<E>
   readonly project: ProjectApi<E>
   readonly form: FormApi<E>
+  readonly secureInput: SecureInputApi<E>
   readonly permission: PermissionApi<E>
   readonly file: FileApi<E>
   readonly command: CommandApi<E>

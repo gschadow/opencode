@@ -712,3 +712,31 @@ test("content-filter failure explains the refusal when the provider gives a reas
     },
   })
 })
+
+test("flags and truncates a degenerate verbatim text loop", async () => {
+  const { published, publisher } = capture()
+  await Effect.runPromise(publisher.publish(LLMEvent.textStart({ id: "text" })))
+  const needle = "Let me do it. ".repeat(20)
+  for (let index = 0; index < 5; index++)
+    await Effect.runPromise(publisher.publish(LLMEvent.textDelta({ id: "text", text: needle })))
+
+  expect(publisher.isDegenerate()).toBe(true)
+
+  await Effect.runPromise(publisher.flush())
+  const ended = published.find((event) => event.type.includes("text.ended"))
+  const text = (ended?.data as { text: string }).text
+  expect(text).toContain("[Output truncated: repetitive loop]")
+  expect(text.length).toBeLessThan(needle.length * 2)
+})
+
+test("does not flag naturally repeated reasoning decoys", async () => {
+  const { publisher } = capture()
+  await Effect.runPromise(publisher.publish(LLMEvent.reasoningStart({ id: "reasoning" })))
+  const decoy = "Hmm. Maybe. Let me check. "
+  for (let index = 0; index < 40; index++)
+    await Effect.runPromise(
+      publisher.publish(LLMEvent.reasoningDelta({ id: "reasoning", text: decoy + String(index) + " " })),
+    )
+
+  expect(publisher.isDegenerate()).toBe(false)
+})

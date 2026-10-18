@@ -2,7 +2,9 @@ export * as SessionRunnerLLM from "./llm.js"
 
 import { Message } from "@opencode/ai"
 import { and, desc, eq, inArray, sql } from "drizzle-orm"
-import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
+import { Cause, Clock, Effect, Exit, FiberMap, Layer, Option, Schema } from "effect"
+import { ConfigBudget } from "@opencode/schema/config/budget"
+import { Config } from "../../config.js"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
 import { LocationLifecycle } from "../../location-lifecycle.js"
@@ -31,6 +33,7 @@ import { SessionStep } from "./step.js"
 import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
+import { LoopDetector } from "./loop-detector.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
@@ -38,12 +41,20 @@ const CONTINUE_AFTER_INCOMPLETE_STREAM =
 const CONTINUE_AFTER_OUTPUT_LIMIT =
   "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces."
 
+// Session titles track what the session is CURRENTLY about, not just the first message.
+// A titled session is regenerated from recent context once enough turns have passed and
+// enough wall-clock time has elapsed since the last title; untitled sessions retry on every
+// promoted input so a transient first-title failure cannot leave a session unnamed forever.
+const TITLE_RETITLE_EVERY_TURNS = 8
+const TITLE_RETITLE_MIN_INTERVAL_MS = 15 * 60 * 1000
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
     const lifecycle = yield* LocationLifecycle.Service
     const store = yield* SessionStore.Service
+    const config = yield* Config.Service
     const context = yield* SessionContext.Service
     const modelTransport = yield* SessionModelTransport.Service
     const db = (yield* Database.Service).db
@@ -53,6 +64,26 @@ const layer = Layer.effect(
     const steps = yield* SessionStep.make
     // Title generation starts once input is visible and must not delay model execution.
     const titles = yield* FiberMap.make<SessionSchema.ID, void, never>()
+    // Per-session title bookkeeping (in-memory, per process): `turns` counts promoted
+    // user inputs, `titledTurn`/`titledAt` record the last title generation attempt.
+    const titleTurns = new Map<SessionSchema.ID, { turns: number; titledTurn: number; titledAt: number }>()
+
+    const checkBudget = Effect.fn("SessionRunner.checkBudget")(function* (session: SessionSchema.Info) {
+      const budget = Option.getOrUndefined(
+        Schema.decodeUnknownOption(Schema.Struct({ maxCost: ConfigBudget.Info.fields.maxCost }))(
+          session.metadata?.budget,
+        ),
+      )
+      const maxCost = budget?.maxCost ?? Config.latest(yield* config.entries(), "budget")?.maxCost
+      // Both the configured ceiling and projected session cost are USD, not microdollars or token prices.
+      if (maxCost !== undefined && session.cost >= maxCost)
+        return yield* new StepFailedError({
+          error: {
+            type: "budget.exceeded",
+            message: `Session budget exceeded. Cost $${session.cost} USD has reached the $${maxCost} USD limit. Stopping.`,
+          },
+        })
+    })
 
     const drain = Effect.fn("SessionRunner.drain")(function* (input: Parameters<Interface["drain"]>[0]) {
       const sessionID = input.sessionID
@@ -60,6 +91,7 @@ const layer = Layer.effect(
       let continuing = input.continuation !== undefined
       let step = input.continuation?.step ?? 1
       let entering = true
+      const loops = LoopDetector.create()
       const promotable = input.promotable ?? "input"
       if (!force && !continuing) {
         const pending = yield* SessionInbox.nextPromotable(db, sessionID, "input")
@@ -116,6 +148,7 @@ const layer = Layer.effect(
                 const compacted = yield* restore(
                   Effect.gen(function* () {
                     const selected = yield* context.select(sessionID)
+                    yield* checkBudget(selected.session)
                     const model = yield* context.resolveModel(selected.session)
                     // Preview updates without admitting them after the already-delivered compaction marker.
                     const history = yield* SessionHistory.preview(
@@ -174,11 +207,27 @@ const layer = Layer.effect(
                   )
                   // A control admitted during context preparation owns this boundary.
                   if (promoted === undefined) return undefined
-                  if (promoted > 0 && !selected.session.parentID && SessionTitle.isUntitled(selected.session))
-                    yield* FiberMap.run(titles, sessionID, title.generate(sessionID), {
-                      onlyIfMissing: true,
-                    })
-                  if (promoted > 0) step = 1
+                  if (promoted > 0 && !selected.session.parentID) {
+                    const now = yield* Clock.currentTimeMillis
+                    const state = titleTurns.get(sessionID) ?? { turns: 0, titledTurn: 0, titledAt: 0 }
+                    state.turns += 1
+                    const due =
+                      SessionTitle.isUntitled(selected.session) ||
+                      (state.turns - state.titledTurn >= TITLE_RETITLE_EVERY_TURNS &&
+                        now - state.titledAt >= TITLE_RETITLE_MIN_INTERVAL_MS)
+                    if (due) {
+                      state.titledTurn = state.turns
+                      state.titledAt = now
+                      yield* FiberMap.run(titles, sessionID, title.generate(sessionID), {
+                        onlyIfMissing: true,
+                      })
+                    }
+                    titleTurns.set(sessionID, state)
+                  }
+                  if (promoted > 0) {
+                    step = 1
+                    loops.reset()
+                  }
                   return { _tag: "Ready" as const, context: yield* context.load(selected) }
                 }),
               )
@@ -191,6 +240,24 @@ const layer = Layer.effect(
       while (true) {
         const next = yield* advanceToStep()
         if (next._tag !== "Ready") return next
+        if (continuing) {
+          const configured = Config.latest(yield* config.entries(), "budget")
+          const budget = Option.getOrUndefined(
+            Schema.decodeUnknownOption(ConfigBudget.Info)(next.context.session.metadata?.budget),
+          )
+          const loop = loops.check(
+            next.context.messages,
+            budget?.loopDetectionThreshold ?? configured?.loopDetectionThreshold,
+            budget?.loopDetectionExemptTools ?? configured?.loopDetectionExemptTools,
+          )
+          if (loop)
+            return yield* new StepFailedError({
+              error: {
+                type: "loop.detected",
+                message: `Repetitive tool loop detected: ${loop.cycleLength}-step cycle repeated ${loop.repeats} times. Stopping to prevent runaway costs.`,
+              },
+            })
+        }
         continuing = yield* runStep(next.context, step)
         step++
         force = false
@@ -200,6 +267,7 @@ const layer = Layer.effect(
 
     const prepareContext = Effect.fn("SessionRunner.prepareContext")(function* (sessionID: SessionSchema.ID) {
       const selected = yield* context.select(sessionID)
+      yield* checkBudget(selected.session)
       // A blocked initial instruction baseline must leave admitted input pending.
       yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)
       return selected
@@ -217,6 +285,7 @@ const layer = Layer.effect(
         // Reuse boundary preparation once; retries refresh context without delivering more input.
         const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(context.load)))
         initial = undefined
+        yield* checkBudget(loaded.session)
         const compacted = yield* compaction.compact({ reason: "auto", context: loaded })
         if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })
         if (compacted.status === "completed") {
@@ -398,6 +467,7 @@ export const node = makeLocationNode({
     SessionContext.node,
     SessionModelTransport.node,
     SessionStore.node,
+    Config.node,
     SessionCompaction.node,
     Plugin.node,
     SessionTitle.node,

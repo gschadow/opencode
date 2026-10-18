@@ -172,6 +172,14 @@ import type {
   ProjectUpdateOutput,
   FormListInput,
   FormListOutput,
+  SecureInputRequestListInput,
+  SecureInputRequestListOutput,
+  SecureInputListInput,
+  SecureInputListOutput,
+  SecureInputReplyInput,
+  SecureInputReplyOutput,
+  SecureInputRejectInput,
+  SecureInputRejectOutput,
   PermissionRequestListInput,
   PermissionRequestListOutput,
   PermissionSavedListInput,
@@ -1142,6 +1150,44 @@ const EndpointFormList = (raw: RawClient["server.form"]) => (input?: FormListInp
 
 const adaptGroupForm = (raw: RawClient["server.form"]) => ({ list: EndpointFormList(raw) })
 
+const EndpointSecureInputRequestList =
+  (raw: RawClient["server.secure-input"]) => (input?: SecureInputRequestListInput) =>
+    preserveEffect<SecureInputRequestListOutput>()(
+      raw["secureInput.request.list"]({ query: { location: input?.["location"] } }).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
+const EndpointSecureInputList = (raw: RawClient["server.secure-input"]) => (input: SecureInputListInput) =>
+  preserveEffect<SecureInputListOutput>()(
+    raw["secureInput.list"]({ params: { sessionID: input["sessionID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointSecureInputReply = (raw: RawClient["server.secure-input"]) => (input: SecureInputReplyInput) =>
+  preserveEffect<SecureInputReplyOutput>()(
+    raw["secureInput.reply"]({
+      params: { sessionID: input["sessionID"], requestID: input["requestID"] },
+      payload: { value: input["value"] },
+    }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const EndpointSecureInputReject = (raw: RawClient["server.secure-input"]) => (input: SecureInputRejectInput) =>
+  preserveEffect<SecureInputRejectOutput>()(
+    raw["secureInput.reject"]({ params: { sessionID: input["sessionID"], requestID: input["requestID"] } }).pipe(
+      Effect.mapError(mapClientError),
+    ),
+  )
+
+const adaptGroupSecureInput = (raw: RawClient["server.secure-input"]) => ({
+  request: { list: EndpointSecureInputRequestList(raw) },
+  list: EndpointSecureInputList(raw),
+  reply: EndpointSecureInputReply(raw),
+  reject: EndpointSecureInputReject(raw),
+})
+
 const EndpointPermissionRequestList = (raw: RawClient["server.permission"]) => (input?: PermissionRequestListInput) =>
   preserveEffect<PermissionRequestListOutput>()(
     raw["permission.request.list"]({ query: { location: input?.["location"] } }).pipe(Effect.mapError(mapClientError)),
@@ -1637,6 +1683,7 @@ const adaptClient = (raw: RawClient) => ({
   credential: adaptGroupCredential(raw["server.credential"]),
   project: adaptGroupProject(raw["server.project"]),
   form: adaptGroupForm(raw["server.form"]),
+  secureInput: adaptGroupSecureInput(raw["server.secure-input"]),
   permission: adaptGroupPermission(raw["server.permission"]),
   file: adaptGroupFile(raw["server.fs"]),
   command: adaptGroupCommand(raw["server.command"]),

@@ -100,3 +100,24 @@ export type Info<
   readonly output?: Output
   readonly options?: Options
 }
+
+/** Model-facing tool summary for user-initiated invocation browsers. */
+export interface Description extends Schema.Schema.Type<typeof Description> {}
+export const Description = Schema.Struct({
+  name: Schema.String,
+  description: Schema.String,
+  inputSchema: Schema.Unknown,
+}).annotate({ identifier: "Tool.Description" })
+
+export interface Invocation extends Schema.Schema.Type<typeof Invocation> {}
+export const Invocation = Schema.Struct({
+  name: Schema.String,
+  input: Schema.Unknown,
+}).annotate({ identifier: "Tool.Invocation" })
+
+export interface InvocationResult extends Schema.Schema.Type<typeof InvocationResult> {}
+export const InvocationResult = Schema.Struct({
+  output: Schema.optional(Schema.Unknown),
+  content: Schema.Array(Content),
+  metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+}).annotate({ identifier: "Tool.InvocationResult" })

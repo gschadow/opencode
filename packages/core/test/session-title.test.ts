@@ -34,6 +34,9 @@ import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Money } from "@opencode/schema/money"
+import { Config } from "@opencode/core/config"
+import { Document, Info } from "@opencode/schema/config"
+import { ConfigBudget } from "@opencode/schema/config/budget"
 import { Deferred, Effect, Fiber, Layer, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 
@@ -103,6 +106,7 @@ const models = Layer.mock(SessionRunnerModel.Service)({
 const smallModels = Layer.mock(Model.Service, {
   small: () => Effect.succeed(selectedSmall),
 })
+const config = Config.testLayer()
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([
@@ -116,12 +120,13 @@ const it = testEffect(
     ]),
     [
       llmClient.replace(client),
+      Config.node.replace(config),
       Model.node.replace(smallModels),
       SessionRunnerModel.node.replace(models),
       Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
       PluginSupervisor.node.replace(Layer.empty),
     ],
-  ),
+  ).pipe(Layer.provideMerge(config)),
 )
 
 const insertSession = (id: Session.ID, title?: string, created?: number, model?: Model.Ref) =>
@@ -197,6 +202,60 @@ const enableTitleAgent = Effect.gen(function* () {
     })
   })
 })
+
+it.effect("direct title regeneration does not request a model with an exhausted budget", () =>
+  Effect.gen(function* () {
+    yield* enableTitleAgent
+    const configuration = yield* Config.Test
+    yield* configuration.setEntries([
+      new Document({ type: "document", info: new Info({ budget: new ConfigBudget.Info({ maxCost: 0 }) }) }),
+    ])
+    const sessionID = Session.ID.make("ses_title_regenerate_budget")
+    yield* insertSession(sessionID, "Original title")
+    yield* prompt(sessionID, "Regenerate the title")
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+    expect(requests).toHaveLength(0)
+    const store = yield* SessionStore.Service
+    expect(yield* store.get(sessionID)).toMatchObject({ title: "Original title", cost: 0 })
+  }),
+)
+
+for (const maxCost of [0.25, 1]) {
+  it.effect(`title fallback checks fresh spending against USD ceiling ${maxCost}`, () =>
+    Effect.gen(function* () {
+      yield* enableTitleAgent
+      selectedSmall = lowSmall
+      const configuration = yield* Config.Test
+      yield* configuration.setEntries([
+        new Document({ type: "document", info: new Info({ budget: new ConfigBudget.Info({ maxCost }) }) }),
+      ])
+      const sessionID = Session.ID.make(`ses_title_fallback_budget_${maxCost}`)
+      yield* insertSession(sessionID, "Original title")
+      yield* prompt(sessionID, "Regenerate with fallback")
+      titleStream = () =>
+        requests.length === 1
+          ? Stream.make(
+              LLMEvent.stepFinish({
+                index: 0,
+                reason: { normalized: "stop" },
+                usage: { inputTokens: 250_000, nonCachedInputTokens: 250_000 },
+              }),
+              LLMEvent.providerError({ message: "Title unavailable after billed usage" }),
+            )
+          : successfulTitle()
+      const title = yield* SessionTitle.Service
+      yield* title.generate(sessionID)
+      const blocked = maxCost === 0.25
+      expect(requests.map((request) => String(request.model.id))).toEqual(
+        blocked ? ["title-small"] : ["title-small", "title-model"],
+      )
+      const store = yield* SessionStore.Service
+      expect((yield* store.get(sessionID))?.title).toBe(blocked ? "Original title" : "Generated Title")
+      expect((yield* store.get(sessionID))?.cost).toBeCloseTo(blocked ? 0.25 : 0.2500233)
+    }),
+  )
+}
 
 it.effect("generates a title from the sole user message and renames the session", () =>
   Effect.gen(function* () {

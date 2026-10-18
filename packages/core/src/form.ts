@@ -89,6 +89,8 @@ export interface Interface {
   readonly get: (id: ID) => Effect.Effect<Info, NotFoundError>
   readonly list: (input?: ListInput) => Effect.Effect<ReadonlyArray<Info>>
   readonly state: (id: ID) => Effect.Effect<State, NotFoundError>
+  /** Await a form's terminal state without creating or cancelling it; use with `create` when a caller owns the timeout. */
+  readonly wait: (id: ID) => Effect.Effect<TerminalState, NotFoundError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, AlreadySettledError | InvalidAnswerError | NotFoundError>
   readonly cancel: (id: ID, options?: CancelOptions) => Effect.Effect<void, AlreadySettledError | NotFoundError>
 }
@@ -177,6 +179,11 @@ export const layer = Layer.effect(
       return (yield* requireEntry(id)).state
     })
 
+    const wait = Effect.fn("Form.wait")(function* (id: ID) {
+      const entry = yield* requireEntry(id)
+      return yield* Deferred.await(entry.deferred)
+    })
+
     const reply = Effect.fn("Form.reply")((input: ReplyInput) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
@@ -226,7 +233,7 @@ export const layer = Layer.effect(
     )
     yield* Effect.addFinalizer(() => close)
 
-    return Service.of({ create, ask, get, list, state, reply, cancel, close })
+    return Service.of({ create, ask, get, list, state, wait, reply, cancel, close })
   }),
 )
 

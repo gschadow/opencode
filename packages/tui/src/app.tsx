@@ -63,6 +63,8 @@ import { PermissionProvider } from "./context/permission"
 import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
+import { DialogTool } from "./component/dialog-tool"
+import { SecureInputDialogs } from "./component/secure-input-dialogs"
 import { DialogStatus } from "./component/dialog-status"
 import { DialogConfig } from "./component/dialog-config"
 import { DialogDebug } from "./component/dialog-debug"
@@ -930,6 +932,15 @@ function App() {
         },
       },
       {
+        name: "tool.list",
+        title: "Tools",
+        category: "Agent",
+        slash: { name: "tools" },
+        run: () => {
+          dialog.replace(() => <DialogTool />)
+        },
+      },
+      {
         name: "agent.cycle",
         title: "Agent cycle",
         category: "Agent",
@@ -1436,6 +1447,7 @@ function App() {
         <Reconnecting managed={client.restart !== undefined} />
       </Show>
       <MigrationOverlay />
+      <SecureInputDialogs />
       <Toast />
     </box>
   )

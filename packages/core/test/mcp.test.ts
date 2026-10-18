@@ -22,6 +22,7 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { ID, type Payload } from "@opencode/schema/event"
 import { Form } from "@opencode/core/form"
+import { SecureInput } from "@opencode/core/secure-input"
 import { Integration } from "@opencode/core/integration"
 import { Environment } from "@opencode/core/environment/index"
 import { EnvironmentUnavailable } from "@opencode/core/environment/unavailable"
@@ -119,6 +120,7 @@ function resourceServer(
           name: string
           arguments: Record<string, unknown> | undefined
           sessionID: unknown
+          legacySessionID: unknown
           progressToken: unknown
         }>,
         initializations: 0,
@@ -190,6 +192,7 @@ function resourceServer(
               name: request.params.name,
               arguments: request.params.arguments,
               sessionID: request.params._meta?.["ai.opencode/sessionID"],
+              legacySessionID: request.params._meta?.opencodeSessionId,
               progressToken: request.params._meta?.progressToken,
             })
             return Promise.resolve({ content: [] })
@@ -296,6 +299,7 @@ function resourceMcpLayer(
   ).pipe(
     Layer.provideMerge(Mcp.layer(options)),
     Layer.provideMerge(Form.layer),
+    Layer.provideMerge(SecureInput.layer),
     Layer.provide(
       Layer.mergeAll(
         overrides?.managed ? Layer.succeed(ManagedPolicy.Service, overrides.managed) : ManagedPolicy.layer,
@@ -554,12 +558,14 @@ test("passes session IDs as MCP request metadata", async () => {
             name: "echo",
             arguments: { text: "hello" },
             sessionID: "ses_mcp_metadata",
+            legacySessionID: "ses_mcp_metadata",
             progressToken: expect.any(Number),
           },
           {
             name: "echo",
             arguments: {},
             sessionID: undefined,
+            legacySessionID: undefined,
             progressToken: expect.any(Number),
           },
         ])
@@ -1926,6 +1932,7 @@ const shutdownIt = testEffect(
       Integration.node,
       Credential.node,
       Form.node,
+      SecureInput.node,
       Environment.node,
       Location.node,
     ]),

@@ -5,6 +5,7 @@ import { ephemeral, inventory } from "./event.js"
 import { Permission } from "./permission.js"
 import { AbsolutePath, optional } from "./schema.js"
 import { ConfigAgent } from "./config/agent.js"
+import { ConfigBudget } from "./config/budget.js"
 import { ConfigMedia } from "./config/media.js"
 import { ConfigCompaction } from "./config/compaction.js"
 import { ConfigCommand } from "./config/command.js"
@@ -84,6 +85,9 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   }),
   compaction: ConfigCompaction.Info.pipe(optional).annotate({
     description: "Conversation compaction behavior",
+  }),
+  budget: ConfigBudget.Info.pipe(optional).annotate({
+    description: "Session spending ceiling",
   }),
   skills: Schema.String.pipe(Schema.Array, optional).annotate({
     description: "Additional paths or URLs to discover skills from",

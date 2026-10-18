@@ -6,10 +6,12 @@ import type { Agent } from "@opencode/schema/agent"
 import { Context, DateTime, Effect, Layer, Stream } from "effect"
 import { Database } from "../database/database.js"
 import { Bus } from "../bus.js"
+import { Config } from "../config.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { isExactRootFallback } from "@opencode/util/session-title-fallback"
 import { llmClient } from "../effect/app-node-platform.js"
 import { SessionContext } from "./context.js"
+import { SessionBudget } from "./budget.js"
 import { SessionEvent } from "./event.js"
 import { SessionHistory } from "./history.js"
 import type { SessionRunnerModel } from "./runner/model.js"
@@ -44,6 +46,7 @@ export const layer = Layer.effect(
     const context = yield* SessionContext.Service
     const store = yield* SessionStore.Service
     const db = (yield* Database.Service).db
+    const checkBudget = yield* SessionBudget.make
 
     const attempt = Effect.fn("SessionTitle.attempt")(function* (input: {
       readonly session: SessionSchema.Info
@@ -71,6 +74,7 @@ export const layer = Layer.effect(
         messages: [Message.user(input.text)],
       })
       if (prepared.event.result !== undefined) return prepared.event.result
+      yield* checkBudget(input.session.id)
       yield* llm.stream(prepared.request, prepared.options).pipe(
         Stream.runForEach((event) => {
           if (LLMEvent.is.providerError(event)) failed = true
@@ -146,12 +150,17 @@ export const layer = Layer.effect(
         )
         .pipe(Effect.catchDefect((defect) => (defect === titleChanged ? Effect.void : Effect.die(defect))))
     })
-    return Service.of({ generate })
+    return Service.of({
+      generate: (sessionID) =>
+        generate(sessionID).pipe(
+          Effect.catchTag("Session.StepFailedError", (error) => Effect.logWarning(error.message)),
+        ),
+    })
   }),
 )
 
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Bus.node, llmClient, SessionContext.node, SessionStore.node, Database.node],
+  deps: [Bus.node, Config.node, llmClient, SessionContext.node, SessionStore.node, Database.node],
 })

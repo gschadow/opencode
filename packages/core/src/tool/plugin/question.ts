@@ -71,20 +71,17 @@ export const Plugin = {
               .pipe(
                 Effect.mapError((error) => new ToolFailure({ message: "Permission denied: question", error })),
                 Effect.andThen(
-                  forms
-                    .ask({
-                      sessionID: context.sessionID,
-                      title: "Questions",
-                      metadata: {
-                        kind: "question",
-                        tool: { messageID: context.messageID, id: context.id },
-                      },
-                      fields: [
-                        toField(input.questions[0], 0),
-                        ...input.questions.slice(1).map((question, index) => toField(question, index + 1)),
-                      ],
-                    })
-                    .pipe(Effect.orDie),
+                  askQuestions(forms, input.questions, {
+                    sessionID: context.sessionID,
+                    metadata: {
+                      kind: "question",
+                      tool: { messageID: context.messageID, id: context.id },
+                    },
+                    fields: [
+                      toField(input.questions[0], 0),
+                      ...input.questions.slice(1).map((question, index) => toField(question, index + 1)),
+                    ],
+                  }),
                 ),
                 Effect.flatMap((state) => {
                   // Deliberate defect tunnel (see Permission.assert): a dismissal must dodge
@@ -114,6 +111,63 @@ export const Plugin = {
       )
       .pipe(Effect.orDie)
   }),
+}
+
+// An unattended question must not stall the session forever. After this deadline the
+// recommended option is taken when every question has exactly one; otherwise the form is
+// cancelled, which surfaces as the usual CancelledError dismissal.
+const QUESTION_TIMEOUT = "5 minutes"
+
+function recommendedAnswer(question: Question.Prompt): ReadonlyArray<string> | undefined {
+  const recommended = question.options.filter((option) => option.label.endsWith("(Recommended)"))
+  if (recommended.length !== 1) return undefined
+  return [recommended[0].label]
+}
+
+function askQuestions(
+  forms: Form.Interface,
+  questions: ReadonlyArray<Question.Prompt>,
+  input: {
+    readonly sessionID: Form.Info["sessionID"]
+    readonly metadata: Form.Info["metadata"]
+    readonly fields: Parameters<Form.Interface["create"]>[0]["fields"]
+  },
+) {
+  const id = Form.ID.create()
+  const automatic = questions.map(recommendedAnswer)
+  const autoAnswerable = automatic.every((answer): answer is ReadonlyArray<string> => answer !== undefined)
+  return Effect.gen(function* () {
+    yield* forms
+      .create({
+        id,
+        sessionID: input.sessionID,
+        title: "Questions",
+        metadata: input.metadata,
+        fields: input.fields,
+      })
+      .pipe(Effect.orDie)
+    const wait = forms.wait(id).pipe(Effect.orDie)
+    const settled = autoAnswerable
+      ? wait.pipe(
+          Effect.timeoutOrElse({
+            duration: QUESTION_TIMEOUT,
+            orElse: () =>
+              Effect.gen(function* () {
+                yield* Effect.logInfo("auto-answering question on timeout", { requestID: id })
+                const answer = Object.fromEntries(
+                  questions.map((question, index) => {
+                    const labels = automatic[index] ?? []
+                    return [`q${index}`, question.multiple === true ? [...labels] : (labels[0] ?? "")]
+                  }),
+                )
+                yield* forms.reply({ id, answer }).pipe(Effect.orDie)
+                return yield* wait
+              }),
+          }),
+        )
+      : wait
+    return yield* settled.pipe(Effect.onInterrupt(() => Effect.ignore(forms.cancel(id))))
+  })
 }
 
 function toField(question: Question.Prompt, index: number): Form.Field {

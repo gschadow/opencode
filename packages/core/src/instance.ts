@@ -15,6 +15,7 @@ import { FileSystemSearch } from "./filesystem/search.js"
 import { Generate } from "./generate.js"
 import { Voice } from "./voice.js"
 import { Form } from "./form.js"
+import { SecureInput } from "./secure-input.js"
 import { Image } from "./image.js"
 import { LocationWatcher } from "./filesystem/location-watcher.js"
 import { Integration } from "./integration.js"
@@ -97,6 +98,7 @@ const nodes = [
   ReferenceInstructions.node,
   InstructionEntry.node,
   Form.node,
+  SecureInput.node,
   Generate.node,
   Voice.node,
   ReadToolFileSystem.node,

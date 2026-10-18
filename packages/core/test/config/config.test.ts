@@ -37,6 +37,26 @@ const selection = Schema.decodeUnknownSync(ConfigModel.Selection)
 const decodeInfo = Schema.decodeUnknownSync(Info, { errors: "all", onExcessProperty: "ignore" })
 const encodeInfo = Schema.encodeSync(Info)
 
+test("preserves finite session budget ceilings in USD through config normalization", () => {
+  for (const maxCost of [0, -1, 0.25, 10]) {
+    expect(migrateV1({ budget: { maxCost } })).toEqual({ budget: { maxCost } })
+  }
+  expect(encodeInfo(new Info({}))).toEqual({})
+  expect(encodeInfo(decodeInfo({ budget: {} }))).toEqual({ budget: {} })
+  for (const maxCost of [NaN, Infinity, -Infinity, "1", null]) {
+    expect(() => decodeInfo({ budget: { maxCost } })).toThrow()
+  }
+})
+
+test("preserves and validates loop detection budget configuration", () => {
+  const budget = { loopDetectionThreshold: 10, loopDetectionExemptTools: "mux_(read|wait)$" }
+  expect(migrateV1({ budget })).toEqual({ budget })
+  for (const loopDetectionThreshold of [0, -1, 1.5, Infinity, "3", null])
+    expect(() => decodeInfo({ budget: { loopDetectionThreshold } })).toThrow()
+  // Regex validity is enforced by the loop detector (falls back to its default), not the portable schema.
+  expect(decodeInfo({ budget: { loopDetectionExemptTools: "[" } }).budget?.loopDetectionExemptTools).toBe("[")
+})
+
 function migrateV1(input: unknown) {
   const result = ConfigNormalize.normalize(input)
   if (result.type !== "normalized") throw new Error("expected normalized config")

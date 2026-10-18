@@ -12,6 +12,7 @@ import { Credential } from "../credential.js"
 import { Bus } from "../bus.js"
 import { Environment } from "../environment/index.js"
 import { Form } from "../form.js"
+import { SecureInput } from "../secure-input.js"
 import { Integration } from "../integration.js"
 import { KeyedMutex } from "../effect/keyed-mutex.js"
 import { Location } from "../location.js"
@@ -228,6 +229,7 @@ export const layer = (options?: Options) =>
         )
       })
 
+      const secureInput = yield* SecureInput.Service
       const elicitation = {
         create: (input: {
           readonly server: string
@@ -443,6 +445,7 @@ export const layer = (options?: Options) =>
             authProvider,
             elicitation,
             options?.clientInfo,
+            secureInput,
           ).pipe(
             Effect.flatMap((connection) => connection.tools().pipe(Effect.map((tools) => ({ connection, tools })))),
             // A stdio server is spawned on this location's execution plane, not the host's.
@@ -775,7 +778,7 @@ export function configured(options?: Options) {
   return makeLocationNode({
     service: Service,
     layer: layer(options),
-    deps: [Location.node, Environment.node, Bus.node, Form.node, Integration.node, Credential.node],
+    deps: [Location.node, Environment.node, Bus.node, Form.node, SecureInput.node, Integration.node, Credential.node],
   })
 }
 

@@ -55,6 +55,28 @@ const INPUT_FAILURES = {
   },
 } satisfies Record<InputFailureReason, SessionError.Error>
 
+// Models occasionally fall into verbatim repetition loops ("Let me do it. Let me act.
+// Let me do it. ...") that burn tokens until the gateway kills the stream. Detect a long
+// verbatim repetition in the text or reasoning tail and stop the step early.
+const DEGENERATE_WINDOW = 200
+const DEGENERATE_REPEATS = 4
+const DEGENERATE_CHECK_INTERVAL = 512
+
+// A degenerate loop is a LONG VERBATIM repetition. The needle must recur exactly:
+// reasoning tail-recap phrases ("Hmm.", "Maybe.", "Let me check.") repeat naturally and
+// must NOT be flagged.
+function isDegenerateRepetition(text: string) {
+  if (text.length < DEGENERATE_WINDOW * DEGENERATE_REPEATS) return false
+  const needle = text.slice(-DEGENERATE_WINDOW)
+  let count = 0
+  let index = 0
+  while (count < DEGENERATE_REPEATS && (index = text.indexOf(needle, index)) !== -1) {
+    count++
+    index += DEGENERATE_WINDOW
+  }
+  return count >= DEGENERATE_REPEATS
+}
+
 /** Immutable fold of the durable facts a step's writer has recorded so far. */
 export interface StepRecord {
   /** The model produced visible output this attempt, which bars transparent retries and overflow recovery. */
@@ -125,6 +147,11 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
   let outputStarted = false
   let stepFailure: SessionError.Error | undefined
   let stepSettlement: StepRecord["finish"]
+  // Set once a verbatim repetition is detected; the runner stops the step instead of
+  // consuming the rest of a runaway stream. The checked length is per stream so the
+  // repetition scan runs every DEGENERATE_CHECK_INTERVAL characters, not per delta.
+  let degenerate = false
+  const degenerateChecked = new Map<string, number>()
 
   const startAssistant = Effect.fnUntraced(function* () {
     if (stepStarted) return assistantMessageID
@@ -233,7 +260,26 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         yield* publishDelta(id)
       }
     })
-    return { start, append, end, flush, publishPending, has: (id: string) => chunks.has(id) }
+    const value = (id: string) => chunks.get(id)?.values.join("") ?? ""
+    // Replace a fragment's buffered content without publishing, so the final
+    // `end` (and its durable Text/Reasoning.Ended) carries only the bounded prefix.
+    const truncate = (id: string, next: string) => {
+      const current = chunks.get(id)
+      if (!current) return
+      current.values.length = 0
+      current.values.push(next)
+      current.pending = ""
+    }
+    return {
+      start,
+      append,
+      end,
+      flush,
+      publishPending,
+      has: (id: string) => chunks.has(id),
+      value,
+      truncate,
+    }
   }
 
   const text = fragments(
@@ -296,6 +342,27 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
       })
     }),
   )
+
+  // A verbatim repetition in the streamed text or reasoning is a runaway loop; truncate
+  // the buffered fragment to a bounded prefix and let the runner stop the step.
+  const guardDegenerate = Effect.fnUntraced(function* (
+    kind: "text" | "reasoning",
+    fragment: ReturnType<typeof fragments>,
+    id: string,
+    marker: string,
+  ) {
+    if (degenerate) return
+    const current = fragment.value(id)
+    if (current.length < (degenerateChecked.get(kind) ?? 0) + DEGENERATE_CHECK_INTERVAL) return
+    degenerateChecked.set(kind, current.length)
+    if (!isDegenerateRepetition(current)) return
+    degenerate = true
+    fragment.truncate(id, current.slice(0, DEGENERATE_WINDOW) + "\n\n" + marker)
+    yield* Effect.logWarning(`degenerate ${kind} loop detected, aborting stream`, {
+      sessionID: input.sessionID,
+      messageID: assistantMessageID,
+    })
+  })
 
   // Deltas are batched, but block starts are not. Publishing held deltas first keeps each
   // block's content ahead of the next block, so the published order matches the model's.
@@ -457,6 +524,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         return
       case "text-delta":
         yield* text.append(event.id, event.text, providerState(event.providerMetadata))
+        yield* guardDegenerate("text", text, event.id, "[Output truncated: repetitive loop]")
         return
       case "text-end":
         yield* text.end(event.id, providerState(event.providerMetadata), event.text)
@@ -474,6 +542,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         return
       case "reasoning-delta":
         yield* reasoning.append(event.id, event.text, providerState(event.providerMetadata))
+        yield* guardDegenerate("reasoning", reasoning, event.id, "[Reasoning truncated: repetitive loop]")
         return
       case "reasoning-end":
         yield* reasoning.end(event.id, providerState(event.providerMetadata), event.text)
@@ -649,6 +718,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     failIncompleteTools,
     hasProviderError: () => providerFailed,
     hasStarted: () => stepStarted,
+    isDegenerate: () => degenerate,
     /** Immutable snapshot of everything recorded for this step so far. */
     record: (): StepRecord => ({
       outputStarted,

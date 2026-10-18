@@ -29,6 +29,9 @@ import {
 import { Cause, Clock, Duration, Effect, Exit, Schedule, Schema } from "effect"
 import { ConfigMCP } from "@opencode/schema/config/mcp"
 import type { Session } from "@opencode/schema/session"
+import type { SecureInput } from "../secure-input.js"
+import { z } from "zod"
+import { waitForAbort } from "@opencode/util/process"
 import { McpStdio } from "./stdio.js"
 
 const DEFAULT_STARTUP_TIMEOUT = 30_000
@@ -150,7 +153,11 @@ export const connect = Effect.fnUntraced(function* (
   authProvider?: OAuthClientProvider,
   elicitation?: ElicitationHandler,
   clientInfo: Implementation = { name: "opencode", version: "unknown" },
+  secureInput?: SecureInput.Interface,
 ) {
+  // Capabilities are bound to this exact local connection, never a remote endpoint.
+  const owner = {}
+  const secrets = config.type === "local" ? secureInput : undefined
   // The SDK takes list-changed handlers at construction, but consumers register after connect. On a
   // modern connection the SDK opens the subscriptions/listen stream behind these itself.
   const changed = { tools: () => {}, prompts: () => {}, resources: () => {} }
@@ -182,6 +189,7 @@ export const connect = Effect.fnUntraced(function* (
     )
 
   const initialize = Effect.fnUntraced(function* (transport: Transport) {
+    const runPromise = Effect.runPromiseWith(yield* Effect.context())
     const runFork = Effect.runForkWith(yield* Effect.context())
     const client = new Client(clientInfo, {
       capabilities: {
@@ -204,6 +212,14 @@ export const connect = Effect.fnUntraced(function* (
       runFork(Effect.logWarning("mcp transport error", { server, error: lastError }))
     }
     client.setRequestHandler("roots/list", () => ({ roots: [{ uri: pathToFileURL(directory).href }] }))
+    if (secrets) client.setRequestHandler("opencode/secure-input", {
+      params: z.object({ token: z.string(), prompt: z.string(), sessionName: z.string().optional(), command: z.string().optional() }),
+      result: z.object({ value: z.string() }),
+    }, (params, ctx) => runPromise(secrets.request(owner, params).pipe(
+      Effect.raceFirst(waitForAbort(ctx.mcpReq.signal)),
+      Effect.map((value) => ({ value })),
+      Effect.mapError(() => new Error("Secure input cancelled or unavailable")),
+    )))
     if (elicitation) {
       client.setRequestHandler("elicitation/create", (request, ctx) =>
         Effect.runPromise(elicitation.create({ server, params: request.params, signal: ctx.mcpReq.signal })),
@@ -265,8 +281,7 @@ export const connect = Effect.fnUntraced(function* (
     // Servers that bundle their own Code Mode (Cloudflare and others) expose raw tools when asked
     // with ?codemode=false, which is what our Code Mode wants. The configured URL stays the OAuth identity.
     const url = new URL(config.url)
-    const addedCodemode =
-      config.codemode !== false && !url.searchParams.has("codemode") && !rejectsUnknownQuery(url)
+    const addedCodemode = config.codemode !== false && !url.searchParams.has("codemode") && !rejectsUnknownQuery(url)
     if (addedCodemode) url.searchParams.set("codemode", "false")
     const open = Effect.fnUntraced(function* (url: URL) {
       session.transport = new StreamableHTTPClientTransport(url, {
@@ -366,18 +381,29 @@ export const connect = Effect.fnUntraced(function* (
         request("get MCP prompt", (signal) =>
           client.getPrompt({ name: input.name, arguments: input.args ?? {} }, { signal, timeout: execution }),
         ),
-      callTool: (input) =>
-        request("call MCP tool", (signal) =>
+      callTool: (input) => Effect.scoped(Effect.gen(function* () {
+        const token = secrets && input.sessionID ? yield* secrets.grant(owner, input.sessionID) : undefined
+        return yield* request("call MCP tool", (signal) =>
           client.callTool(
             {
               name: input.name,
               arguments: input.args ?? {},
-              ...(input.sessionID === undefined ? {} : { _meta: { "ai.opencode/sessionID": input.sessionID } }),
+              ...(input.sessionID === undefined
+                ? {}
+                : {
+                    _meta: {
+                      "ai.opencode/sessionID": input.sessionID,
+                      // Existing Tessera servers use the fork's original metadata key.
+                       opencodeSessionId: input.sessionID,
+                       ...(token === undefined ? {} : { "opencode.dev/secure-input-token": token }),
+                    },
+                  }),
             },
             // Requesting progress keeps long calls alive under the SDK's timeout; execution is the hard wall.
             { signal, timeout: execution, onprogress: () => {} },
           ),
-        ).pipe(Effect.map(toCallToolResult)),
+        ).pipe(Effect.map(toCallToolResult))
+      })),
       onClose: (callback) => {
         client.onclose = () => callback(lastError ? `Connection closed: ${lastError}` : "Connection closed")
       },

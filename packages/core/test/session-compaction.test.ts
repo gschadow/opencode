@@ -1,4 +1,8 @@
-import { expect, test } from "bun:test"
+import { beforeEach, expect, test } from "bun:test"
+import { TestLLM } from "@opencode/ai/testing"
+import { Config } from "@opencode/core/config"
+import { Document, Info } from "@opencode/schema/config"
+import { ConfigBudget } from "@opencode/schema/config/budget"
 import { GenerationOptions, LLMClient, LLMEvent, LanguageModel, ToolDefinition, type LLMRequest } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { Database } from "@opencode/core/database/database"
@@ -48,27 +52,34 @@ const cost = [
     },
   },
 ]
+const successfulSummary = () =>
+  Stream.make(
+    LLMEvent.textDelta({ id: "summary", text: "## Objective\n- manual summary" }),
+    LLMEvent.stepFinish({
+      index: 0,
+      reason: { normalized: "stop" },
+      usage: {
+        inputTokens: 15,
+        outputTokens: 6,
+        nonCachedInputTokens: 10,
+        cacheReadInputTokens: 3,
+        cacheWriteInputTokens: 2,
+        reasoningTokens: 2,
+      },
+    }),
+    LLMEvent.finish({
+      reason: { normalized: "stop" },
+    }),
+  )
+let summaryStream: () => Stream.Stream<LLMEvent> = successfulSummary
+beforeEach(() => {
+  requests = []
+  summaryStream = successfulSummary
+})
 const client = Layer.mock(LLMClient.Service)({
   stream: (request: LLMRequest) => {
     requests.push(request)
-    return Stream.make(
-      LLMEvent.textDelta({ id: "summary", text: "## Objective\n- manual summary" }),
-      LLMEvent.stepFinish({
-        index: 0,
-        reason: { normalized: "stop" },
-        usage: {
-          inputTokens: 15,
-          outputTokens: 6,
-          nonCachedInputTokens: 10,
-          cacheReadInputTokens: 3,
-          cacheWriteInputTokens: 2,
-          reasoningTokens: 2,
-        },
-      }),
-      LLMEvent.finish({
-        reason: { normalized: "stop" },
-      }),
-    )
+    return summaryStream()
   },
   generate: () => Effect.die("unused"),
 })
@@ -77,6 +88,7 @@ const resolved = SessionRunnerModel.resolved(model, {
   cost,
   limit: { context: 200_000, output: 32_000 },
 })
+const config = Config.testLayer()
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([
@@ -91,9 +103,10 @@ const it = testEffect(
     [
       Bus.node.replace(Bus.configured({ persist: true })),
       llmClient.replace(client),
+      Config.node.replace(config),
       Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
     ],
-  ),
+  ).pipe(Layer.provideMerge(config)),
 )
 
 test("compaction prompt preserves detailed work state and relevant files", () => {
@@ -350,6 +363,66 @@ const compactManually = (
     })
     return yield* compaction.compact({ reason: "manual", context: loaded(session, messages), inputID })
   })
+
+for (const mode of ["nudge", "retry"] as const) {
+  for (const maxCost of [0.25, 1]) {
+    it.effect(`compaction checks fresh budget before ${mode} with USD ceiling ${maxCost}`, () =>
+      Effect.gen(function* () {
+        const configuration = yield* Config.Test
+        yield* configuration.setEntries([
+          new Document({ type: "document", info: new Info({ budget: new ConfigBudget.Info({ maxCost }) }) }),
+        ])
+        const session = yield* insertSession(Session.ID.make(`ses_compaction_budget_${mode}_${maxCost}`))
+        const hooks = yield* PluginHooks.Service
+        yield* hooks.register("session", "retry", (event) =>
+          Effect.sync(() => {
+            event.decision = { retry: true, delay: 0 }
+          }),
+        )
+        summaryStream = () =>
+          requests.length === 1
+            ? Stream.fromIterable(
+                TestLLM.complete(
+                  {
+                    reason: { normalized: mode === "retry" ? "unknown" : "stop" },
+                    usage: { inputTokens: 250_000, nonCachedInputTokens: 250_000 },
+                  },
+                  LLMEvent.textDelta({ id: "budget-summary", text: "Missing required summary headings" }),
+                ),
+              )
+            : successfulSummary()
+        const result = yield* compactManually(session, [
+          SessionMessage.User.make({
+            id: SessionMessage.ID.create(),
+            type: "user",
+            text: "Summarize this conversation",
+            time: { created: DateTime.makeUnsafe(0) },
+          }),
+        ])
+        const blocked = maxCost === 0.25
+        expect(result).toMatchObject(
+          blocked
+            ? {
+                status: "failed",
+                error: {
+                  type: "budget.exceeded",
+                  message: "Session budget exceeded. Cost $0.25 USD has reached the $0.25 USD limit. Stopping.",
+                },
+              }
+            : { status: "completed" },
+        )
+        expect(requests).toHaveLength(blocked ? 1 : 2)
+        const store = yield* SessionStore.Service
+        expect((yield* store.get(session.id))?.cost).toBeCloseTo(blocked ? 0.25 : 0.2500233)
+        expect((yield* store.context(session.id)).at(-1)).toMatchObject(
+          blocked
+            ? { type: "compaction", status: "failed", error: { type: "budget.exceeded" }, cost: 0.25 }
+            : { type: "compaction", status: "completed" },
+        )
+      }),
+    )
+  }
+}
 
 /** The recent text a manual compaction keeps when the latest exchange is one tool call with this output. */
 const recentWithToolOutput = (id: Session.ID, content: SessionMessage.ToolStateCompleted["content"]) =>

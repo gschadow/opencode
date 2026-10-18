@@ -10,6 +10,7 @@ import { makeSessionGroup } from "./groups/session.js"
 import { makePermissionGroup } from "./groups/permission.js"
 import { FileSystemGroup } from "./groups/fs.js"
 import { makeFormGroup } from "./groups/form.js"
+import { makeSecureInputGroup } from "./groups/secure-input.js"
 import { CommandGroup } from "./groups/command.js"
 import { SkillGroup } from "./groups/skill.js"
 import { RpcGroup } from "./groups/rpc.js"
@@ -80,6 +81,7 @@ type MixedMiddlewareGroups<
   SessionLocationId extends HttpApiMiddleware.AnyId,
   SessionLocationService,
 > = ReturnType<typeof makePermissionGroup<LocationId, LocationService, SessionLocationId, SessionLocationService>>
+  | ReturnType<typeof makeSecureInputGroup<LocationId, LocationService, SessionLocationId, SessionLocationService>>
 
 type ApiGroups<
   LocationId extends HttpApiMiddleware.AnyId,
@@ -174,6 +176,7 @@ const makeApiFromGroup = <
     .add(CredentialGroup)
     .add(ProjectGroup.middleware(locationMiddleware))
     .add(makeFormGroup(locationMiddleware))
+    .add(makeSecureInputGroup(locationMiddleware, sessionLocationMiddleware))
     .add(makePermissionGroup(locationMiddleware, sessionLocationMiddleware))
     .add(FileSystemGroup.middleware(locationMiddleware))
     .add(CommandGroup.middleware(locationMiddleware))

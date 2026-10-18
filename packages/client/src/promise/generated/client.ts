@@ -166,6 +166,14 @@ import type {
   ProjectUpdateOutput,
   FormListInput,
   FormListOutput,
+  SecureInputRequestListInput,
+  SecureInputRequestListOutput,
+  SecureInputListInput,
+  SecureInputListOutput,
+  SecureInputReplyInput,
+  SecureInputReplyOutput,
+  SecureInputRejectInput,
+  SecureInputRejectOutput,
   PermissionRequestListInput,
   PermissionRequestListOutput,
   PermissionSavedListInput,
@@ -1530,6 +1538,56 @@ export function make(options: ClientOptions) {
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
             empty: false,
+          },
+          requestOptions,
+        ),
+    },
+    secureInput: {
+      request: {
+        list: (input?: SecureInputRequestListInput, requestOptions?: RequestOptions) =>
+          request<SecureInputRequestListOutput>(
+            {
+              method: "GET",
+              path: `/api/secure-input`,
+              query: { location: input?.["location"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404],
+              empty: false,
+            },
+            requestOptions,
+          ),
+      },
+      list: (input: SecureInputListInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SecureInputListOutput }>(
+          {
+            method: "GET",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/secure-input`,
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      reply: (input: SecureInputReplyInput, requestOptions?: RequestOptions) =>
+        request<SecureInputReplyOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/secure-input/${encodeURIComponent(input.requestID)}/reply`,
+            body: { value: input["value"] },
+            successStatus: 204,
+            declaredStatuses: [400, 401, 404],
+            empty: true,
+          },
+          requestOptions,
+        ),
+      reject: (input: SecureInputRejectInput, requestOptions?: RequestOptions) =>
+        request<SecureInputRejectOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/secure-input/${encodeURIComponent(input.requestID)}/reject`,
+            successStatus: 204,
+            declaredStatuses: [400, 401, 404],
+            empty: true,
           },
           requestOptions,
         ),

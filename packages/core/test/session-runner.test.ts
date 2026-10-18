@@ -62,6 +62,7 @@ import { Agent } from "@opencode/core/agent"
 import { Config } from "@opencode/core/config"
 import { Document, Info } from "@opencode/schema/config"
 import { ConfigCompaction } from "@opencode/schema/config/compaction"
+import { ConfigBudget } from "@opencode/schema/config/budget"
 import { Tool } from "@opencode/core/tool"
 import type { Info as ToolInfo } from "@opencode/schema/tool"
 import { InstructionStateTable, SessionInboxTable, SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
@@ -210,6 +211,7 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     }).pipe(Effect.andThen(Deferred.succeed(barrier.release, undefined)), Effect.asVoid)
   return {
     currentModel: model,
+    modelCosts: [] as Model.Info["cost"],
     compaction,
     modelResolveHook: resolvesModel,
     systemBaseline: "Initial context",
@@ -327,7 +329,7 @@ const layer = Layer.unwrap(
             const selected = session.model?.id === "replacement" ? replacementModel : state.currentModel
             return SessionRunnerModel.resolved(selected, {
               capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
-              cost: [],
+              cost: state.modelCosts,
               limit: modelLimits.get(String(selected.id)) ?? defaultModelLimit,
               variant: session.model?.variant,
               compaction: state.compaction,
@@ -494,7 +496,7 @@ const layer = Layer.unwrap(
         Model.node.replace(promptModels),
         SessionExecution.node.replace(execution),
       ],
-    )
+    ).pipe(Layer.provideMerge(config))
   }),
 ).pipe(Layer.provideMerge(Layer.sync(RunnerState, makeRunnerState)), Layer.provideMerge(testLLM))
 const it = testEffect(layer)
@@ -979,6 +981,376 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
 })
 
 describe("SessionRunnerLLM", () => {
+  scenario("stops exact repeating tool calls without an extra final model request", function* (s) {
+    yield* s.admit("Repeat")
+    yield* s.llm.push(
+      ...Array.from({ length: 3 }, (_, index) => TestLLM.tool(`repeat-${index}`, "echo", { text: "same" })),
+      TestLLM.text("Must not run", "loop-final"),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({
+      _tag: "Session.StepFailedError",
+      error: { type: "loop.detected" },
+    })
+    expect(s.requests).toHaveLength(3)
+    expect(s.executions).toEqual(["same", "same", "same"])
+  })
+
+  scenario("stops repeating multi-step tool cycles at the configured threshold", function* (s) {
+    const config = yield* Config.Test
+    yield* config.setEntries([
+      new Document({
+        type: "document",
+        info: new Info({ budget: new ConfigBudget.Info({ loopDetectionThreshold: 4 }) }),
+      }),
+    ])
+    yield* s.admit("Cycle")
+    yield* s.llm.push(
+      ...Array.from({ length: 8 }, (_, index) =>
+        TestLLM.tool(`cycle-${index}`, "echo", { text: index % 2 ? "B" : "A" }),
+      ),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({
+      error: {
+        type: "loop.detected",
+        message: "Repetitive tool loop detected: 2-step cycle repeated 4 times. Stopping to prevent runaway costs.",
+      },
+    })
+    expect(s.requests).toHaveLength(8)
+  })
+
+  scenario("uses the session metadata loop threshold override", function* (s) {
+    yield* s.session.setMetadata({ sessionID, metadata: { budget: { loopDetectionThreshold: 2 } } })
+    yield* s.admit("Repeat twice")
+    yield* s.llm.push(
+      TestLLM.tool("a", "echo", { text: "same" }),
+      TestLLM.tool("b", "echo", { text: "same" }),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    expect(s.requests).toHaveLength(2)
+  })
+
+  scenario("does not confuse distinct long arguments with identical heads and tails", function* (s) {
+    yield* s.admit("Distinct arguments")
+    yield* s.llm.push(
+      ...Array.from({ length: 18 }, (_, index) =>
+        TestLLM.tool(`distinct-${index}`, "echo", {
+          text: `${"a".repeat(100)}${index}${"z".repeat(100)}`,
+        }),
+      ),
+      TestLLM.stop(),
+    )
+    yield* s.resume
+    expect(s.requests).toHaveLength(19)
+    expect(s.executions).toHaveLength(18)
+  })
+
+  scenario("canonicalizes nested object key order for exact tool repetition", function* (s) {
+    yield* s.admit("Same object")
+    yield* s.llm.push(
+      ...Array.from({ length: 3 }, (_, index) =>
+        TestLLM.tool(`object-${index}`, "echo", {
+          text: "same",
+          extra: index % 2 ? { a: 1, b: { c: 2, d: 3 } } : { b: { d: 3, c: 2 }, a: 1 },
+        }),
+      ),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    expect(s.requests).toHaveLength(3)
+  })
+
+  scenario("does not impose a step ceiling while retaining bounded recent loop history", function* (s) {
+    yield* s.admit("Long distinct work followed by a loop")
+    yield* s.llm.push(
+      ...Array.from({ length: 65 }, (_, index) => TestLLM.tool(`long-${index}`, "echo", { text: `work-${index}` })),
+      ...Array.from({ length: 3 }, (_, index) => TestLLM.tool(`loop-${index}`, "echo", { text: "repeat" })),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    expect(s.requests).toHaveLength(68)
+  })
+
+  scenario("starts fresh after a stopped loop when new user input is promoted", function* (s) {
+    yield* s.admit("Loop first")
+    yield* s.llm.push(
+      ...Array.from({ length: 3 }, (_, index) => TestLLM.tool(`first-${index}`, "echo", { text: "same" })),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    yield* s.admit("New work")
+    yield* s.llm.push(
+      TestLLM.tool("new-1", "echo", { text: "same" }),
+      TestLLM.tool("new-2", "echo", { text: "same" }),
+      TestLLM.stop(),
+    )
+    yield* s.resume
+    expect(s.requests).toHaveLength(6)
+  })
+
+  scenario("detects repeating batches regardless of parallel call order", function* (s) {
+    yield* s.admit("Repeat batches")
+    yield* s.llm.push(
+      ...Array.from({ length: 3 }, (_, index) =>
+        TestLLM.toolCalls(
+          ...["A", "B"]
+            .map((text, part) =>
+              LLMEvent.toolCall({
+                id: `batch-${index}-${part}`,
+                name: "echo",
+                input: { text },
+              }),
+            )
+            .sort((a, b) => (index % 2 ? a.id.localeCompare(b.id) : b.id.localeCompare(a.id))),
+        ),
+      ),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    expect(s.requests).toHaveLength(3)
+  })
+
+  for (const name of ["mux_mux_read", "mux_mux_wait", "task_status", "task_wait"]) {
+    scenario(`exempts long-running polling by default: ${name}`, function* (s) {
+      yield* s.admit("Poll")
+      yield* s.llm.push(
+        ...Array.from({ length: 16 }, (_, index) => TestLLM.tool(`poll-${index}`, name, {})),
+        TestLLM.stop(),
+      )
+      yield* s.resume
+      expect(s.requests).toHaveLength(17)
+    })
+  }
+
+  scenario("honors configured tool-name regex exemptions even in mixed batches", function* (s) {
+    const config = yield* Config.Test
+    yield* config.setEntries([
+      new Document({
+        type: "document",
+        info: new Info({ budget: new ConfigBudget.Info({ loopDetectionExemptTools: "^echo$" }) }),
+      }),
+    ])
+    yield* s.admit("Exempt echo")
+    yield* s.llm.push(
+      ...Array.from({ length: 16 }, (_, index) =>
+        TestLLM.toolCalls(
+          LLMEvent.toolCall({ id: `exempt-${index}`, name: "echo", input: { text: "same" } }),
+          hostedCall(`search-${index}`, `different query ${index}`),
+        ),
+      ),
+      TestLLM.stop(),
+    )
+    yield* s.resume
+    expect(s.requests).toHaveLength(17)
+  })
+
+  scenario("does not let exempt polling hide repeating nonexempt calls", function* (s) {
+    yield* s.admit("Mixed loop")
+    yield* s.llm.push(
+      ...Array.from({ length: 3 }, (_, index) =>
+        TestLLM.toolCalls(
+          LLMEvent.toolCall({ id: `echo-${index}`, name: "echo", input: { text: "same" } }),
+          LLMEvent.toolCall({ id: `poll-${index}`, name: "mux_read", input: {} }),
+        ),
+      ),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    expect(s.requests).toHaveLength(3)
+  })
+
+  scenario("resets loop detection when steering input promotes at the detection boundary", function* (s) {
+    yield* s.admit("Start")
+    const gate = yield* Deferred.make<void>()
+    const reached = yield* Deferred.make<void>()
+    yield* s.llm.push(
+      TestLLM.tool("before-1", "echo", { text: "same" }),
+      TestLLM.tool("before-2", "echo", { text: "same" }),
+      Stream.fromEffect(Deferred.succeed(reached, undefined)).pipe(
+        Stream.flatMap(() => Stream.fromEffect(Deferred.await(gate))),
+        Stream.flatMap(() => Stream.fromIterable(TestLLM.tool("before-3", "echo", { text: "same" }))),
+      ),
+      TestLLM.tool("after-1", "echo", { text: "same" }),
+      TestLLM.tool("after-2", "echo", { text: "same" }),
+      TestLLM.stop(),
+    )
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* Deferred.await(reached)
+    yield* s.admit("Keep going with new input")
+    yield* Deferred.succeed(gate, undefined)
+    yield* Fiber.join(run)
+    expect(s.requests).toHaveLength(6)
+    expect(s.executions).toHaveLength(5)
+  })
+
+  scenario("detects duplicate tool bursts inside a single model step", function* (s) {
+    yield* s.admit("Burst")
+    yield* s.llm.push(
+      TestLLM.toolCalls(
+        ...Array.from({ length: 10 }, (_, index) =>
+          LLMEvent.toolCall({ id: `burst-${index}`, name: "echo", input: { text: "same" } }),
+        ),
+      ),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    expect(s.requests).toHaveLength(1)
+    expect(s.executions).toHaveLength(10)
+  })
+
+  scenario("detects target-aware edit repeats only at the higher threshold", function* (s) {
+    yield* s.admit("Edit cycle")
+    yield* s.llm.push(
+      ...Array.from({ length: 15 }, (_, index) =>
+        TestLLM.tool(`edit-${index}`, "edit", {
+          filePath: "/project/same.ts",
+          oldString: `old-${index}`,
+          newString: `new-${index}`,
+        }),
+      ),
+      TestLLM.stop(),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "loop.detected" } })
+    expect(s.requests).toHaveLength(15)
+  })
+
+  scenario("does not collapse different read offsets, commands, URLs or queries into target repeats", function* (s) {
+    yield* s.admit("Distinct targets")
+    yield* s.llm.push(
+      ...Array.from({ length: 18 }, (_, index) =>
+        TestLLM.toolCalls(
+          LLMEvent.toolCall({
+            id: `read-${index}`,
+            name: "read",
+            input: { filePath: "/project/same.ts", offset: index * 100 },
+          }),
+          LLMEvent.toolCall({
+            id: `bash-${index}`,
+            name: "bash",
+            input: { command: `curl https://example.test/${index}` },
+          }),
+          hostedCall(`query-${index}`, `${"prefix".repeat(20)}${index}${"suffix".repeat(20)}`),
+        ),
+      ),
+      TestLLM.stop(),
+    )
+    yield* s.resume
+    expect(s.requests).toHaveLength(19)
+  })
+
+  for (const [name, maxCost, cost, blocked] of [
+    ["no ceiling", undefined, 100, false],
+    ["below ceiling in USD", 0.5, 0.25, false],
+    ["at ceiling in USD", 0.5, 0.5, true],
+    ["above ceiling", 0.5, 0.75, true],
+    ["zero ceiling", 0, 0, true],
+    ["negative ceiling", -1, 0, true],
+  ] as const) {
+    scenario(`enforces session spending budget: ${name}`, function* (s) {
+      const config = yield* Config.Test
+      yield* config.setEntries([
+        new Document({ type: "document", info: new Info({ budget: new ConfigBudget.Info({ maxCost }) }) }),
+      ])
+      yield* s.db.update(SessionTable).set({ cost }).where(eq(SessionTable.id, sessionID)).run()
+      yield* prepareTitleGeneration
+      yield* s.admit("Check budget")
+      yield* s.llm.push(TestLLM.text("Allowed", "budget-response"))
+      const result = yield* s.resume.pipe(Effect.exit)
+      if (!blocked) {
+        expect(result._tag).toBe("Success")
+        expect(s.requests.length).toBeGreaterThan(0)
+        return
+      }
+      expect(result._tag).toBe("Failure")
+      if (Exit.isFailure(result))
+        expect(Cause.squash(result.cause)).toMatchObject({
+          _tag: "Session.StepFailedError",
+          error: {
+            type: "budget.exceeded",
+            message: `Session budget exceeded. Cost $${cost} USD has reached the $${maxCost} USD limit. Stopping.`,
+          },
+        })
+      expect(s.requests).toHaveLength(0)
+      expect(yield* recordedEventTypes(sessionID)).not.toContain("session.step.started.1")
+    })
+  }
+
+  scenario("stops the next model step after recorded USD cost reaches the budget", function* (s) {
+    const config = yield* Config.Test
+    yield* config.setEntries([
+      new Document({ type: "document", info: new Info({ budget: new ConfigBudget.Info({ maxCost: 0.25 }) }) }),
+    ])
+    s.modelCosts = [
+      {
+        input: Money.USDPerMillionTokens.make(25_000),
+        output: Money.USDPerMillionTokens.zero,
+        cache: { read: Money.USDPerMillionTokens.zero, write: Money.USDPerMillionTokens.zero },
+      },
+    ]
+    yield* s.admit("Use echo then continue")
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "tool-calls" }, usage: { inputTokens: 10, nonCachedInputTokens: 10 } },
+        LLMEvent.toolCall({ id: "budget-echo", name: "echo", input: { text: "hello" } }),
+      ),
+      TestLLM.text("Must not run", "over-budget-response"),
+    )
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "budget.exceeded" } })
+    // 10 tokens * $25,000 / million tokens = $0.25, not 250,000 microdollars.
+    expect((yield* s.session.get(sessionID)).cost).toBe(Money.USD.make(0.25))
+    expect(s.requests).toHaveLength(1)
+    expect(s.executions).toHaveLength(1)
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ error: { type: "budget.exceeded" } })
+    expect(s.requests).toHaveLength(1)
+
+    yield* insertSession(otherSessionID)
+    yield* s.session.prompt({ sessionID: otherSessionID, text: "Other session", resume: false })
+    yield* s.session.resume(otherSessionID)
+    expect(s.requests).toHaveLength(2)
+  })
+
+  for (const [budget, blocked] of [
+    [{ maxCost: 0.25 }, true],
+    [{ maxCost: 2 }, false],
+    [{ maxCost: 2, loopDetectionThreshold: 0 }, false],
+    [{ maxCost: 2, loopDetectionExemptTools: "[" }, false],
+    [{ maxCost: 0 }, true],
+    [{}, true],
+    [{ maxCost: null }, true],
+    [{ maxCost: "0.25" }, true],
+    [[], true],
+  ] as const) {
+    scenario(`uses a finite metadata budget override: ${JSON.stringify(budget)}`, function* (s) {
+      const config = yield* Config.Test
+      yield* config.setEntries([
+        new Document({ type: "document", info: new Info({ budget: new ConfigBudget.Info({ maxCost: 0.5 }) }) }),
+      ])
+      yield* s.db.update(SessionTable).set({ cost: 0.5 }).where(eq(SessionTable.id, sessionID)).run()
+      yield* s.session.setMetadata({ sessionID, metadata: { budget } })
+      yield* s.admit("Metadata budget")
+      yield* s.llm.push(TestLLM.text("Allowed", "metadata-budget-response"))
+      expect((yield* s.resume.pipe(Effect.exit))._tag).toBe(blocked ? "Failure" : "Success")
+      expect(s.requests).toHaveLength(blocked ? 0 : 1)
+    })
+  }
+
+  scenario("records a clear budget failure instead of issuing a manual compaction request", function* (s) {
+    const config = yield* Config.Test
+    yield* config.setEntries([
+      new Document({ type: "document", info: new Info({ budget: new ConfigBudget.Info({ maxCost: 0 }) }) }),
+    ])
+    const compaction = yield* s.session.compact({ sessionID })
+    yield* s.resume
+    expect(s.requests).toHaveLength(0)
+    expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
+      status: "failed",
+      error: {
+        type: "budget.exceeded",
+        message: "Session budget exceeded. Cost $0 USD has reached the $0 USD limit. Stopping.",
+      },
+    })
+  })
+
   scenario("generates the title while the first model step is still running", function* (s) {
     yield* prepareTitleGeneration
 
