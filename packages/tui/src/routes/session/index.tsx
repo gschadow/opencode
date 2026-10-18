@@ -1916,6 +1916,7 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
           <Show when={ctx.terminal.width >= 28}>
             <span style={{ fg: theme.text.muted }}> · {model()}</span>
           </Show>
+          <span style={{ fg: theme.text.muted }}> · {Locale.time(props.message.time.created)}</span>
           <Show when={duration() && (ctx.terminal.width < 28 || ctx.terminal.width >= 36)}>
             <span style={{ fg: theme.text.muted }}> · {Locale.duration(duration())}</span>
           </Show>
@@ -2289,6 +2290,7 @@ function UserMessage(props: { message: SessionMessageUser }) {
           flexShrink={0}
         >
           <text fg={theme.text.base}>{props.message.text}</text>
+          <text fg={theme.text.muted}>{Locale.time(props.message.time.created)}</text>
           <Show when={skills().length}>
             <box flexDirection="row" paddingTop={1} gap={1} flexWrap="wrap">
               <For each={skills()}>
