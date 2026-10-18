@@ -3,11 +3,14 @@ import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import {
   createPermissionBodyState,
   permissionAlwaysLines,
+  permissionAlwaysShorten,
+  permissionAlwaysWiden,
   permissionCancel,
   permissionEscape,
   permissionInfo,
   permissionReject,
   permissionRun,
+  shortenPattern,
 } from "@/cli/cmd/run/permission.shared"
 
 function req(input: Partial<PermissionRequest> = {}): PermissionRequest {
@@ -140,5 +143,59 @@ describe("run permission shared", () => {
       "- src/**/*.ts",
       "- src/**/*.tsx",
     ])
+  })
+
+  test("shortenPattern trims one path segment from the right", () => {
+    expect(shortenPattern("/tmp/foo/*")).toBe("/tmp/*")
+    expect(shortenPattern("/tmp/foo/bar/**")).toBe("/tmp/foo/*")
+    expect(shortenPattern("/tmp/*")).toBe("/tmp/*")
+    expect(shortenPattern("src/foo/*")).toBe("src/*")
+    expect(shortenPattern("*.ts")).toBe("*.ts")
+  })
+
+  test("always stage narrows and widens saved patterns with history", () => {
+    const entered = permissionRun(createPermissionBodyState("perm-1"), "perm-1", "always", ["/tmp/foo/*"])
+    expect(entered.state.stage).toBe("always")
+    expect(entered.state.always).toEqual(["/tmp/foo/*"])
+    expect(entered.state.history).toEqual([])
+
+    const narrowed = permissionAlwaysShorten(entered.state)
+    expect(narrowed.always).toEqual(["/tmp/*"])
+    expect(narrowed.history).toEqual([["/tmp/foo/*"]])
+
+    const widened = permissionAlwaysWiden(narrowed)
+    expect(widened.always).toEqual(["/tmp/foo/*"])
+    expect(widened.history).toEqual([])
+
+    expect(permissionAlwaysShorten(narrowed).always).toEqual(["/tmp/*"])
+    const base = createPermissionBodyState("perm-1")
+    expect(permissionAlwaysWiden(base)).toBe(base)
+  })
+
+  test("confirm carries edited always patterns in the reply", () => {
+    const entered = permissionRun(createPermissionBodyState("perm-1"), "perm-1", "always", ["/tmp/foo/*"])
+    const narrowed = permissionAlwaysShorten(entered.state)
+    expect(permissionRun(narrowed, "perm-1", "confirm").reply).toEqual({
+      requestID: "perm-1",
+      reply: "always",
+      patterns: ["/tmp/*"],
+    })
+
+    expect(permissionRun(entered.state, "perm-1", "confirm").reply).toEqual({
+      requestID: "perm-1",
+      reply: "always",
+      patterns: ["/tmp/foo/*"],
+    })
+  })
+
+  test("permanent always flags the reply for persistence", () => {
+    const entered = permissionRun(createPermissionBodyState("perm-1"), "perm-1", "always", ["/tmp/foo/*"])
+    const narrowed = permissionAlwaysShorten(entered.state)
+    expect(permissionRun(narrowed, "perm-1", "permanent").reply).toEqual({
+      requestID: "perm-1",
+      reply: "always",
+      patterns: ["/tmp/*"],
+      persist: true,
+    })
   })
 })

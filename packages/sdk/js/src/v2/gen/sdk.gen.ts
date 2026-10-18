@@ -3168,6 +3168,8 @@ export class Permission extends HeyApiClient {
       workspace?: string
       reply?: "once" | "always" | "reject"
       message?: string
+      patterns?: Array<string>
+      persist?: boolean
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3181,6 +3183,8 @@ export class Permission extends HeyApiClient {
             { in: "query", key: "workspace" },
             { in: "body", key: "reply" },
             { in: "body", key: "message" },
+            { in: "body", key: "patterns" },
+            { in: "body", key: "persist" },
           ],
         },
       ],

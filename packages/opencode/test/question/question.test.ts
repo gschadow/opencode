@@ -1,11 +1,12 @@
 import { afterEach, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Effect, Exit, Fiber, Layer, Queue } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import { Question } from "../../src/question"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { InstanceStore } from "../../src/project/instance-store"
 import { QuestionID } from "../../src/question/schema"
-import { disposeAllInstances, provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
+import { disposeAllInstances, provideInstance, testInstanceStoreLayer, tmpdirScoped, withTmpdirInstance } from "../fixture/fixture"
 import { SessionID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -274,6 +275,124 @@ it.instance(
       }
     }),
   { git: true },
+)
+
+// timeout auto-answer tests
+
+it.effect(
+  "ask - auto-answers with the recommended option on timeout",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* askEffect({
+        sessionID: SessionID.make("ses_test"),
+        questions: [
+          {
+            question: "What would you like to do?",
+            header: "Action",
+            options: [
+              { label: "Build (Recommended)", description: "Build the project" },
+              { label: "Test", description: "Run tests" },
+            ],
+          },
+        ],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* TestClock.adjust("5 minutes")
+
+      expect(yield* Fiber.join(fiber)).toEqual([["Build (Recommended)"]])
+      expect(yield* listEffect).toHaveLength(0)
+    }).pipe(withTmpdirInstance({ git: true })),
+)
+
+it.effect(
+  "ask - auto-answers all questions with recommendations on timeout",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* askEffect({
+        sessionID: SessionID.make("ses_test"),
+        questions: [
+          {
+            question: "What would you like to do?",
+            header: "Action",
+            options: [
+              { label: "Build (Recommended)", description: "Build the project" },
+              { label: "Test", description: "Run tests" },
+            ],
+          },
+          {
+            question: "Which environment?",
+            header: "Env",
+            options: [
+              { label: "Dev", description: "Development" },
+              { label: "Prod (Recommended)", description: "Production" },
+            ],
+          },
+        ],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* TestClock.adjust("5 minutes")
+
+      expect(yield* Fiber.join(fiber)).toEqual([["Build (Recommended)"], ["Prod (Recommended)"]])
+      expect(yield* listEffect).toHaveLength(0)
+    }).pipe(withTmpdirInstance({ git: true })),
+)
+
+it.effect(
+  "ask - without a single recommendation, waits indefinitely",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* askEffect({
+        sessionID: SessionID.make("ses_test"),
+        questions: [
+          {
+            question: "Tricky decision?",
+            header: "Tricky",
+            options: [
+              { label: "Option 1", description: "First option" },
+              { label: "Option 2", description: "Second option" },
+            ],
+          },
+        ],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* TestClock.adjust("1 hour")
+
+      expect(yield* listEffect).toHaveLength(1)
+
+      yield* rejectEffect((yield* listEffect)[0].id)
+      expect((yield* Fiber.await(fiber))._tag).toBe("Failure")
+    }).pipe(withTmpdirInstance({ git: true })),
+)
+
+it.effect(
+  "ask - multiple (Recommended) options are ambiguous, waits indefinitely",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* askEffect({
+        sessionID: SessionID.make("ses_test"),
+        questions: [
+          {
+            question: "Conflicting advice?",
+            header: "Conflict",
+            options: [
+              { label: "A (Recommended)", description: "Option A" },
+              { label: "B (Recommended)", description: "Option B" },
+            ],
+          },
+        ],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* TestClock.adjust("1 hour")
+
+      expect(yield* listEffect).toHaveLength(1)
+
+      yield* rejectEffect((yield* listEffect)[0].id)
+      expect((yield* Fiber.await(fiber))._tag).toBe("Failure")
+    }).pipe(withTmpdirInstance({ git: true })),
 )
 
 // multiple questions tests

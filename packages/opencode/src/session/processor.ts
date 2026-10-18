@@ -73,17 +73,21 @@ interface ProcessorContext extends Input {
   degenerate: boolean
   degeneratePartID: string | undefined
   degenerateCheckedLen: number
+  degenerateTextCheckedLen: number
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
 }
 
-// Reasoning models occasionally fall into repetition loops ("Let me do it. Let
+// Models occasionally fall into repetition loops ("Let me do it. Let
 // me act. Let me do it. ...") that burn tokens until the gateway kills the
-// stream. Detect a long verbatim repetition in the reasoning tail and abort the
-// stream early so the prompt loop can retry the turn.
+// stream. Detect a long verbatim repetition in the reasoning or text tail and
+// abort the stream early so the prompt loop can retry the turn.
 const DEGENERATE_WINDOW = 200
 const DEGENERATE_REPEATS = 4
 const DEGENERATE_CHECK_INTERVAL = 512
+// A degenerate loop is a LONG VERBATIM repetition ("Let me do it. Let me go.
+// OK. ..."). The needle must recur exactly. Reasoning tail-recap phrases
+// ("Hmm.", "Maybe.", "Let me check.") repeat naturally and must NOT be flagged.
 function isDegenerateRepetition(text: string) {
   if (text.length < DEGENERATE_WINDOW * DEGENERATE_REPEATS) return false
   const needle = text.slice(-DEGENERATE_WINDOW)
@@ -134,6 +138,7 @@ const layer = Layer.effect(
         degenerate: false,
         degeneratePartID: undefined,
         degenerateCheckedLen: 0,
+        degenerateTextCheckedLen: 0,
         currentText: undefined,
         reasoningMap: {},
       }
@@ -331,10 +336,18 @@ const layer = Layer.effect(
               ctx.degenerateCheckedLen = ctx.reasoningMap[value.id].text.length
               if (isDegenerateRepetition(ctx.reasoningMap[value.id].text)) {
                 ctx.degenerate = true
+                // Bounded prefix only: the verbatim tail is garbage ("Let me go.
+                // OK. Let me write. ..."). Replace the streamed part so the DB and
+                // the next request don't carry tens of KB of repetition.
+                ctx.reasoningMap[value.id].text =
+                  ctx.reasoningMap[value.id].text.slice(0, DEGENERATE_WINDOW) +
+                  "\n\n[Reasoning truncated: repetitive loop]"
+                yield* session.updatePart(ctx.reasoningMap[value.id])
                 yield* Effect.logWarning("degenerate reasoning loop detected, aborting stream", {
                   "session.id": ctx.sessionID,
                   messageID: ctx.assistantMessage.id,
                 })
+                return
               }
             }
             yield* session.updatePartDelta({
@@ -541,6 +554,26 @@ const layer = Layer.effect(
             if (!ctx.currentText) return
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
+            if (
+              !ctx.degenerate &&
+              ctx.currentText.text.length >= ctx.degenerateTextCheckedLen + DEGENERATE_CHECK_INTERVAL
+            ) {
+              ctx.degenerateTextCheckedLen = ctx.currentText.text.length
+              if (isDegenerateRepetition(ctx.currentText.text)) {
+                ctx.degenerate = true
+                // Bounded prefix only: the verbatim tail is garbage ("Let me do it.
+                // Let me go. OK. ..."). Replace the streamed part so the DB and the
+                // next request don't carry tens of KB of repetition.
+                ctx.currentText.text =
+                  ctx.currentText.text.slice(0, DEGENERATE_WINDOW) + "\n\n[Output truncated: repetitive loop]"
+                yield* session.updatePart(ctx.currentText)
+                yield* Effect.logWarning("degenerate text loop detected, aborting stream", {
+                  "session.id": ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                })
+                return
+              }
+            }
             yield* session.updatePartDelta({
               sessionID: ctx.currentText.sessionID,
               messageID: ctx.currentText.messageID,
@@ -725,7 +758,7 @@ const layer = Layer.effect(
           )
 
           if (ctx.needsCompaction) return "compact"
-          if (ctx.blocked || ctx.assistantMessage.error) return "stop"
+          if (ctx.degenerate || ctx.blocked || ctx.assistantMessage.error) return "stop"
           return "continue"
         })
       })

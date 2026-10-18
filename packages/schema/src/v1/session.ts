@@ -532,6 +532,11 @@ const SessionRevert = Schema.Struct({
   partID: optional(PartID),
   snapshot: optional(Schema.String),
   diff: optional(Schema.String),
+  // Staging timestamp of the revert boundary. filterRevert keeps messages
+  // created before the boundary or at/after this time, and the TUI uses it to
+  // compute the dimmed "reverted" window. Omitting it from the wire schema made
+  // clients fall back to id-based boundaries and stalled TUI type-checks.
+  time: optional(Schema.Number),
 })
 
 const SessionModel = Schema.Struct({

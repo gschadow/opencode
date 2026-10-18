@@ -3,13 +3,14 @@ import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { PlanExitTool } from "./plan"
 import { Session } from "@/session/session"
+import { SessionStatus } from "@/session/status"
 import { QuestionTool } from "./question"
 import { ShellTool } from "./shell"
 import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
-import { TaskTool } from "./task"
+import { TaskTool, TasksTool, TaskStatusTool, TaskWaitTool, TaskCancelTool } from "./task"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
@@ -100,6 +101,10 @@ const layer = Layer.effect(
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
+    const tasks = yield* TasksTool
+    const taskstatus = yield* TaskStatusTool
+    const taskwait = yield* TaskWaitTool
+    const taskcancel = yield* TaskCancelTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
@@ -215,6 +220,10 @@ const layer = Layer.effect(
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           task: Tool.init(task),
+          tasks: Tool.init(tasks),
+          task_status: Tool.init(taskstatus),
+          task_wait: Tool.init(taskwait),
+          task_cancel: Tool.init(taskcancel),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
           search: Tool.init(websearch),
@@ -237,7 +246,11 @@ const layer = Layer.effect(
             tool.grep,
             tool.edit,
             tool.write,
-            tool.task,
+tool.task,
+            tool.tasks,
+            tool.task_status,
+            tool.task_wait,
+            tool.task_cancel,
             tool.fetch,
             tool.todo,
             tool.search,
@@ -435,6 +448,7 @@ export const node = LayerNode.make({
     Agent.node,
     Skill.node,
     Session.node,
+    SessionStatus.node,
     BackgroundJob.node,
     Provider.node,
     LSP.node,

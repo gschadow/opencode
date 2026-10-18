@@ -18,6 +18,8 @@ import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import {
   createPermissionBodyState,
   permissionAlwaysLines,
+  permissionAlwaysShorten,
+  permissionAlwaysWiden,
   permissionCancel,
   permissionEscape,
   permissionHover,
@@ -186,7 +188,7 @@ export function RunPermissionBody(props: {
 
   const run = (option: PermissionOption) => {
     const cur = state()
-    const next = permissionRun(cur, props.request.id, option)
+    const next = permissionRun(cur, props.request.id, option, props.request.always)
     if (next.state !== cur) {
       setState(next.state)
     }
@@ -228,6 +230,19 @@ export function RunPermissionBody(props: {
       shift(event.shift ? -1 : 1)
       event.preventDefault()
       return
+    }
+
+    if (cur.stage === "always" && (event.ctrl || event.shift)) {
+      if (event.name === "right" || event.name === "l") {
+        setState((prev) => permissionAlwaysShorten(prev))
+        event.preventDefault()
+        return
+      }
+      if (event.name === "left" || event.name === "h") {
+        setState((prev) => permissionAlwaysWiden(prev))
+        event.preventDefault()
+        return
+      }
     }
 
     if (event.name === "left" || event.name === "h") {
@@ -410,13 +425,16 @@ export function RunPermissionBody(props: {
                 }}
               >
                 <box width="100%" flexDirection="column" gap={1} paddingLeft={1}>
-                  <For each={permissionAlwaysLines(props.request)}>
+                  <For each={permissionAlwaysLines({ ...props.request, always: state().always })}>
                     {(line) => (
                       <text fg={props.theme.text} wrapMode="word">
                         {line}
                       </text>
                     )}
                   </For>
+                  <text fg={props.theme.muted} wrapMode="word">
+                    ctrl+→ narrow prefix · ctrl+← widen
+                  </text>
                 </box>
               </scrollbox>
             </Match>

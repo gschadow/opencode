@@ -5,6 +5,8 @@ import { Wildcard } from "@opencode-ai/core/util/wildcard"
 import { Deferred, Effect, Layer, Context } from "effect"
 import os from "os"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { PermissionSaved } from "@opencode-ai/core/permission/saved"
+import type { ProjectV2 } from "@opencode-ai/core/project"
 import { EventV2Bridge } from "@/event-v2-bridge"
 
 export const Event = PermissionV1.Event
@@ -23,6 +25,7 @@ interface PendingEntry {
 interface State {
   pending: Map<PermissionV1.ID, PendingEntry>
   approved: PermissionV1.Rule[]
+  projectID: ProjectV2.ID
 }
 
 export function evaluate(permission: string, pattern: string, ...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule {
@@ -43,12 +46,13 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
+    const saved = yield* PermissionSaved.Service
     const state = yield* InstanceState.make<State>(
       Effect.fn("Permission.state")(function* (ctx) {
-        void ctx
         const state = {
           pending: new Map<PermissionV1.ID, PendingEntry>(),
           approved: [],
+          projectID: ctx.project.id,
         }
 
         yield* Effect.addFinalizer(() =>
@@ -65,12 +69,15 @@ const layer = Layer.effect(
     )
 
     const ask = Effect.fn("Permission.ask")(function* (input: PermissionV1.AskInput) {
-      const { approved, pending } = yield* InstanceState.get(state)
+      const { approved, pending, projectID } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false
+      const savedRules = (yield* saved.list({ projectID })).map(
+        (item): PermissionV1.Rule => ({ permission: item.action, pattern: item.resource, action: "allow" }),
+      )
 
       for (const pattern of request.patterns) {
-        const rule = evaluate(request.permission, pattern, ruleset, approved)
+        const rule = evaluate(request.permission, pattern, ruleset, approved, savedRules)
         yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
           return yield* new PermissionV1.DeniedError({
@@ -107,7 +114,7 @@ const layer = Layer.effect(
     })
 
     const reply = Effect.fn("Permission.reply")(function* (input: PermissionV1.ReplyInput) {
-      const { approved, pending } = yield* InstanceState.get(state)
+      const { approved, pending, projectID } = yield* InstanceState.get(state)
       const existing = pending.get(input.requestID)
       if (!existing) return yield* new PermissionV1.NotFoundError({ requestID: input.requestID })
 
@@ -142,7 +149,15 @@ const layer = Layer.effect(
       yield* Deferred.succeed(existing.deferred, undefined)
       if (input.reply === "once") return
 
-      for (const pattern of existing.info.always) {
+      const patterns = input.patterns?.length ? input.patterns : existing.info.always
+      if (input.persist) {
+        yield* saved.add({
+          projectID,
+          action: existing.info.permission,
+          resources: patterns,
+        })
+      }
+      for (const pattern of patterns) {
         approved.push({
           permission: existing.info.permission,
           pattern,
@@ -218,6 +233,10 @@ export function visibleTools<T>(tools: Record<string, T>, ruleset: PermissionV1.
   return Object.fromEntries(Object.entries(tools).filter(([name]) => !hidden.has(name)))
 }
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [EventV2Bridge.node, PermissionSaved.node],
+})
 
 export * as Permission from "."

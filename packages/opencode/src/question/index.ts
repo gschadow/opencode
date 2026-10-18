@@ -103,19 +103,33 @@ const layer = Layer.effect(
       pending.set(id, { info, deferred })
       yield* events.publish(Event.Asked, info)
 
+      const autoAnswers = input.questions.map(recommendedAnswer)
+      const autoAnswerable = autoAnswers.every((a): a is ReadonlyArray<string> => a !== undefined)
+
+      const wait = Deferred.await(deferred)
+      const waitWithTimeout = autoAnswerable
+        ? wait.pipe(
+            Effect.timeoutOrElse({
+              duration: "5 minutes",
+              orElse: () =>
+                Effect.gen(function* () {
+                  yield* Effect.logInfo("auto-answering question on timeout", {
+                    requestID: id,
+                  })
+                  const answers = autoAnswers as ReadonlyArray<ReadonlyArray<string>>
+                  yield* events.publish(Event.Replied, {
+                    sessionID: info.sessionID,
+                    requestID: id,
+                    answers,
+                  })
+                  return answers
+                }),
+            }),
+          )
+        : wait
+
       return yield* Effect.ensuring(
-        Deferred.await(deferred).pipe(
-          Effect.timeoutOrElse({
-            duration: "5 minutes",
-            orElse: () =>
-              events.publish(Event.Rejected, {
-                sessionID: info.sessionID,
-                requestID: id,
-              }).pipe(
-                Effect.andThen(Effect.fail(new RejectedError())),
-              ),
-          }),
-        ),
+        waitWithTimeout,
         Effect.sync(() => {
           pending.delete(id)
         }),
@@ -168,5 +182,11 @@ const layer = Layer.effect(
 )
 
 export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node] })
+
+function recommendedAnswer(info: Info): ReadonlyArray<string> | undefined {
+  const recommended = info.options.filter((option) => option.label.endsWith("(Recommended)"))
+  if (recommended.length !== 1) return undefined
+  return [recommended[0].label]
+}
 
 export * as Question from "."

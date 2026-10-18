@@ -239,9 +239,9 @@ describe("tool parameters", () => {
       const parsed = parse(Task, { description: "d", prompt: "p", subagent_type: "general" })
       expect(parsed.subagent_type).toBe("general")
     })
-    test("accepts optional background flag", () => {
-      const parsed = parse(Task, { description: "d", prompt: "p", subagent_type: "general", background: true })
-      expect(parsed.background).toBe(true)
+    test("accepts optional task_id for resume", () => {
+      const parsed = parse(Task, { description: "d", prompt: "p", subagent_type: "general", task_id: "ses_x" })
+      expect(parsed.task_id).toBe("ses_x")
     })
     test("rejects missing prompt", () => {
       expect(accepts(Task, { description: "d", subagent_type: "general" })).toBe(false)

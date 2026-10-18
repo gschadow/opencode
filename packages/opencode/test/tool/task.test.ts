@@ -3,7 +3,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -248,12 +248,18 @@ describe("tool.task", () => {
   it.instance("execute resumes an existing task session from task_id", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
+      const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
       const child = yield* sessions.create({ parentID: chat.id, title: "Existing child" })
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
-      const promptOps = stubOps({ text: "resumed", onPrompt: (input) => (seen = input) })
+      const promptOps = stubOps({
+        text: "resumed",
+        onPrompt: (input) => {
+          if (input.sessionID === child.id) seen = input
+        },
+      })
 
       const result = yield* def.execute(
         {
@@ -278,7 +284,10 @@ describe("tool.task", () => {
       expect(kids).toHaveLength(1)
       expect(kids[0]?.id).toBe(child.id)
       expect(result.metadata.sessionId).toBe(child.id)
-      expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
+      expect(result.output).toContain(`<task id="${child.id}" state="running">`)
+      const waited = yield* jobs.wait({ id: child.id, timeout: 1_000 })
+      expect(waited.info?.status).toBe("completed")
+      expect(waited.info?.output).toBe("resumed")
       expect(seen?.sessionID).toBe(child.id)
       expect(seen?.variant).toBe("xhigh")
     }),
@@ -287,85 +296,80 @@ describe("tool.task", () => {
   it.instance("execute surfaces child errors with a resumable task_id", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
+      const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
-      const exit = yield* def
-        .execute(
-          {
-            description: "inspect bug",
-            prompt: "look into the cache key path",
-            subagent_type: "general",
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: stubOps({
+              text: "",
+              error: new SessionV1.APIError({ message: "Network connection lost", isRetryable: false }).toObject(),
+            }),
           },
-          {
-            sessionID: chat.id,
-            messageID: assistant.id,
-            agent: "build",
-            abort: new AbortController().signal,
-            extra: {
-              promptOps: stubOps({
-                text: "",
-                error: new SessionV1.APIError({ message: "Network connection lost", isRetryable: false }).toObject(),
-              }),
-            },
-            messages: [],
-            metadata: () => Effect.void,
-            ask: () => Effect.void,
-          },
-        )
-        .pipe(Effect.exit)
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
 
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isSuccess(exit)) throw new Error("expected task failure")
       const child = (yield* sessions.children(chat.id))[0]
       expect(child).toBeDefined()
-      const failure = Cause.squash(exit.cause)
-      expect(failure).toBeInstanceOf(Error)
-      if (!(failure instanceof Error)) throw new Error("expected Error defect")
-      expect(failure.message).toBe(`Subagent failed (task_id: ${child?.id}): Network connection lost`)
+      expect(result.metadata.sessionId).toBe(child?.id)
+      const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
+      expect(waited.info?.status).toBe("error")
+      expect(waited.info?.error).toBe(`Subagent failed (task_id: ${child?.id}): Network connection lost`)
     }),
   )
 
   it.instance("execute surfaces terminal child tool errors with a resumable task_id", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
+      const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
-      const exit = yield* def
-        .execute(
-          {
-            description: "inspect external directory",
-            prompt: "read the external directory",
-            subagent_type: "general",
+      const result = yield* def.execute(
+        {
+          description: "inspect external directory",
+          prompt: "read the external directory",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: stubOps({
+              text: "I will inspect the directory.",
+              toolError: "The user rejected permission to use this specific tool call.",
+            }),
           },
-          {
-            sessionID: chat.id,
-            messageID: assistant.id,
-            agent: "build",
-            abort: new AbortController().signal,
-            extra: {
-              promptOps: stubOps({
-                text: "I will inspect the directory.",
-                toolError: "The user rejected permission to use this specific tool call.",
-              }),
-            },
-            messages: [],
-            metadata: () => Effect.void,
-            ask: () => Effect.void,
-          },
-        )
-        .pipe(Effect.exit)
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
 
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isSuccess(exit)) throw new Error("expected task failure")
       const child = (yield* sessions.children(chat.id))[0]
-      const failure = Cause.squash(exit.cause)
-      expect(failure).toBeInstanceOf(Error)
-      if (!(failure instanceof Error)) throw new Error("expected Error defect")
-      expect(failure.message).toBe(
+      expect(child).toBeDefined()
+      expect(result.metadata.sessionId).toBe(child?.id)
+      const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
+      expect(waited.info?.status).toBe("error")
+      expect(waited.info?.error).toBe(
         `Subagent failed (task_id: ${child?.id}): The user rejected permission to use this specific tool call.`,
       )
     }),
@@ -450,7 +454,7 @@ describe("tool.task", () => {
             messageID: assistant.id,
             agent: "build",
             abort: abort.signal,
-            extra: { promptOps },
+            extra: { promptOps, bypassAgentCheck: true },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -470,11 +474,17 @@ describe("tool.task", () => {
   it.instance("execute creates a child when task_id does not exist", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
+      const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
-      const promptOps = stubOps({ text: "created", onPrompt: (input) => (seen = input) })
+      const promptOps = stubOps({
+        text: "created",
+        onPrompt: (input) => {
+          if (input.sessionID !== chat.id) seen = input
+        },
+      })
 
       const result = yield* def.execute(
         {
@@ -499,7 +509,10 @@ describe("tool.task", () => {
       expect(kids).toHaveLength(1)
       expect(kids[0]?.id).toBe(result.metadata.sessionId)
       expect(result.metadata.sessionId).not.toBe("ses_missing")
-      expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
+      expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="running">`)
+      const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
+      expect(waited.info?.status).toBe("completed")
+      expect(waited.info?.output).toBe("created")
       expect(seen?.sessionID).toBe(result.metadata.sessionId)
     }),
   )
@@ -652,37 +665,6 @@ describe("tool.task", () => {
     },
   )
 
-  it.instance("rejects background execution when the experiment is disabled", () =>
-    Effect.gen(function* () {
-      const { chat, assistant } = yield* seed()
-      const tool = yield* TaskTool
-      const def = yield* tool.init()
-
-      const exit = yield* def
-        .execute(
-          {
-            description: "inspect bug",
-            prompt: "look into the cache key path",
-            subagent_type: "general",
-            background: true,
-          },
-          {
-            sessionID: chat.id,
-            messageID: assistant.id,
-            agent: "build",
-            abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
-            messages: [],
-            metadata: () => Effect.void,
-            ask: () => Effect.void,
-          },
-        )
-        .pipe(Effect.exit)
-
-      expect(Exit.isFailure(exit)).toBe(true)
-    }),
-  )
-
   it.instance("promotes a running foreground task without restarting it", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
@@ -721,7 +703,7 @@ describe("tool.task", () => {
             messageID: assistant.id,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps },
+            extra: { promptOps, bypassAgentCheck: true },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -761,7 +743,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -827,7 +808,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         context,
       )
@@ -873,7 +853,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -906,7 +885,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -945,7 +923,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -984,7 +961,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -1023,7 +999,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,

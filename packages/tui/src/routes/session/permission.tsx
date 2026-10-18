@@ -20,6 +20,16 @@ import { usePathFormatter } from "../../context/path-format"
 
 type PermissionStage = "permission" | "always" | "reject"
 
+// Shorten a saved pattern one path segment from the right. Stops at the
+// directory that contains the trailing wildcard so the pattern never widens
+// to the filesystem root.
+function shortenPattern(pattern: string): string {
+  const stem = pattern.replace(/\*+$/, "").replace(/[\\/]+$/, "")
+  const idx = stem.lastIndexOf("/")
+  if (idx <= 0) return pattern
+  return stem.slice(0, idx) + "/*"
+}
+
 function EditBody(props: { request: PermissionRequest }) {
   const themeState = useTheme()
   const theme = themeState.theme
@@ -115,6 +125,8 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const sync = useSync()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
+    always: props.request.always,
+    history: [] as string[][],
   })
   const pathFormatter = usePathFormatter()
 
@@ -138,6 +150,71 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
     sync.set("permission", props.request.sessionID, [])
   }
 
+  const narrow = () => {
+    setStore((s) => {
+      const next = s.always.map(shortenPattern)
+      if (next.every((pattern, i) => pattern === s.always[i])) return {}
+      return { always: next, history: [...s.history, s.always] }
+    })
+  }
+
+  const widen = () => {
+    setStore((s) => {
+      if (!s.history.length) return {}
+      const history = [...s.history]
+      const prev = history.pop()!
+      return { always: prev, history }
+    })
+  }
+
+  const narrowHint = useCommandShortcut("permission.always.narrow")
+  const widenHint = useCommandShortcut("permission.always.widen")
+
+  useBindings(() => ({
+    mode: OPENCODE_BASE_MODE,
+    commands: [
+      {
+        name: "permission.always.narrow",
+        title: "Narrow allowed prefix",
+        category: "Permission",
+        run() {
+          if (store.stage !== "always") return
+          narrow()
+        },
+      },
+      {
+        name: "permission.always.widen",
+        title: "Widen allowed prefix",
+        category: "Permission",
+        run() {
+          if (store.stage !== "always") return
+          widen()
+        },
+      },
+    ],
+    bindings:
+      store.stage === "always"
+        ? [
+            {
+              key: "ctrl+right,shift+right",
+              desc: "Narrow allowed prefix",
+              group: "Permission",
+              cmd: () => {
+                if (store.stage === "always") narrow()
+              },
+            },
+            {
+              key: "ctrl+left,shift+left",
+              desc: "Widen allowed prefix",
+              group: "Permission",
+              cmd: () => {
+                if (store.stage === "always") widen()
+              },
+            },
+          ]
+        : [],
+  }))
+
   return (
     <Switch>
       <Match when={store.stage === "always"}>
@@ -145,14 +222,14 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
           title="Always allow"
           body={
             <Switch>
-              <Match when={props.request.always.length === 1 && props.request.always[0] === "*"}>
+              <Match when={store.always.length === 1 && store.always[0] === "*"}>
                 <TextBody title={"This will allow " + props.request.permission + " until OpenCode is restarted."} />
               </Match>
               <Match when={true}>
                 <box paddingLeft={1} gap={1}>
                   <text fg={theme.textMuted}>This will allow the following patterns until OpenCode is restarted</text>
                   <box>
-                    <For each={props.request.always}>
+                    <For each={store.always}>
                       {(pattern) => (
                         <text fg={theme.text}>
                           {"- "}
@@ -161,34 +238,49 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                       )}
                     </For>
                   </box>
+                  <box flexDirection="row" gap={2}>
+                    <text fg={theme.textMuted}>
+                      {narrowHint()} <span style={{ fg: theme.text }}>narrow prefix</span>
+                    </text>
+                    <text fg={theme.textMuted}>
+                      {widenHint()} <span style={{ fg: theme.text }}>widen prefix</span>
+                    </text>
+                  </box>
                 </box>
               </Match>
             </Switch>
           }
-          options={{ confirm: "Confirm", cancel: "Cancel" }}
+          options={{ confirm: "Confirm", permanent: "Permanently", cancel: "Cancel" }}
           escapeKey="cancel"
           onSelect={(option) => {
             setStore("stage", "permission")
             if (option === "cancel") return
-            void sdk.client.permission.reply({
-              reply: "always",
-              requestID: props.request.id,
-              directory: props.directory,
-              workspace: project.workspace.current(),
-            }).catch(() => clearRequest())
+            const edited = JSON.stringify(store.always) !== JSON.stringify(props.request.always)
+            void sdk.client.permission
+              .reply({
+                reply: "always",
+                requestID: props.request.id,
+                patterns: edited ? store.always : undefined,
+                persist: option === "permanent" ? true : undefined,
+                directory: props.directory,
+                workspace: project.workspace.current(),
+              })
+              .catch(() => clearRequest())
           }}
         />
       </Match>
       <Match when={store.stage === "reject"}>
         <RejectPrompt
           onConfirm={(message) => {
-            void sdk.client.permission.reply({
-              reply: "reject",
-              requestID: props.request.id,
-              directory: props.directory,
-              message: message || undefined,
-              workspace: project.workspace.current(),
-            }).catch(() => clearRequest())
+            void sdk.client.permission
+              .reply({
+                reply: "reject",
+                requestID: props.request.id,
+                directory: props.directory,
+                message: message || undefined,
+                workspace: project.workspace.current(),
+              })
+              .catch(() => clearRequest())
           }}
           onCancel={() => {
             setStore("stage", "permission")
@@ -412,7 +504,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               fullscreen
               onSelect={(option) => {
                 if (option === "always") {
-                  setStore("stage", "always")
+                  setStore({ stage: "always", always: props.request.always, history: [] })
                   return
                 }
                 if (option === "reject") {
@@ -420,20 +512,24 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     setStore("stage", "reject")
                     return
                   }
-                  void sdk.client.permission.reply({
-                    reply: "reject",
+                  void sdk.client.permission
+                    .reply({
+                      reply: "reject",
+                      requestID: props.request.id,
+                      directory: props.directory,
+                      workspace: project.workspace.current(),
+                    })
+                    .catch(() => clearRequest())
+                  return
+                }
+                void sdk.client.permission
+                  .reply({
+                    reply: "once",
                     requestID: props.request.id,
                     directory: props.directory,
                     workspace: project.workspace.current(),
-                  }).catch(() => clearRequest())
-                  return
-                }
-                void sdk.client.permission.reply({
-                  reply: "once",
-                  requestID: props.request.id,
-                  directory: props.directory,
-                  workspace: project.workspace.current(),
-                }).catch(() => clearRequest())
+                  })
+                  .catch(() => clearRequest())
               }}
             />
           )

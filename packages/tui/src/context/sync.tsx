@@ -36,7 +36,7 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, createEffect, on, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
@@ -495,6 +495,25 @@ export const {
         }
       }
     })
+
+    // On SSE reconnect the server does not re-emit session statuses, so a status
+    // left as "busy" by an interrupted run (e.g. server restart mid-turn) would
+    // stay stuck showing "running". Re-query statuses whenever the connection
+    // drops and comes back to reflect the server's actual state.
+    createEffect(
+      on(
+        sdk.connected,
+        (connected, prev) => {
+          if (connected && prev === false) {
+            const workspace = project.workspace.current()
+            void sdk.client.session
+              .status({ workspace })
+              .then((x) => setStore("session_status", reconcile(x.data ?? {})))
+          }
+        },
+        { defer: true },
+      ),
+    )
 
     const exit = useExit()
     const args = useArgs()

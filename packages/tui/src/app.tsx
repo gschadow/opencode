@@ -26,6 +26,7 @@ import {
 } from "solid-js"
 import { TuiPathsProvider, TuiStartupProvider, TuiTerminalEnvironmentProvider, useTuiStartup } from "./context/runtime"
 import { DialogProvider, useDialog } from "./ui/dialog"
+import { linkAt } from "./ui/link"
 import { DialogProvider as DialogProviderList } from "./component/dialog-provider"
 import { ErrorComponent } from "./component/error-component"
 import { PluginRouteMissing } from "./component/plugin-route-missing"
@@ -377,6 +378,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const toast = useToast()
   const themeState = useTheme()
   const { theme, mode, setMode, locked, lock, unlock } = themeState
+  let linkClickDown: { x: number; y: number } | null = null
   const sync = useSync()
   const project = useProject()
   const exit = useExit()
@@ -892,10 +894,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "app.toggle.animations",
-        title: kv.get("animations_enabled", true) ? "Disable animations" : "Enable animations",
+        title: kv.get("animations_enabled", false) ? "Disable animations" : "Enable animations",
         category: "System",
         run: () => {
-          kv.set("animations_enabled", !kv.get("animations_enabled", true))
+          kv.set("animations_enabled", !kv.get("animations_enabled", false))
           dialog.clear()
         },
       },
@@ -1091,6 +1093,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       flexDirection="column"
       backgroundColor={theme.background}
       onMouseDown={(evt) => {
+        if (evt.button === MouseButton.LEFT) linkClickDown = { x: evt.x, y: evt.y }
         if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
         if (evt.button !== MouseButton.RIGHT) return
 
@@ -1098,11 +1101,16 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         evt.preventDefault()
         evt.stopPropagation()
       }}
-      onMouseUp={
-        !Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT
-          ? () => Selection.copy(renderer, toast, clipboard)
-          : undefined
-      }
+      onMouseUp={(event) => {
+        if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) Selection.copy(renderer, toast, clipboard)
+        if (event.defaultPrevented || event.button !== MouseButton.LEFT) return
+        const down = linkClickDown
+        linkClickDown = null
+        if (down === null || Math.abs(event.x - down.x) > 1 || Math.abs(event.y - down.y) > 1) return
+        const href = linkAt(renderer.currentRenderBuffer, event.x, event.y)
+        if (!href) return
+        open(href).catch(() => {})
+      }}
     >
       <Show when={Flag.OPENCODE_SHOW_TTFD}>
         <TimeToFirstDraw />

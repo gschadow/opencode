@@ -30,6 +30,37 @@ import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
 
+// The AI SDK's fullStream is an async generator. When the consuming fiber is
+// interrupted (e.g. user /abort) while a tool call is in-flight, the generator
+// is suspended awaiting the tool's execute promise, which runs on a SEPARATE
+// Effect fiber (tools.ts run.promise). `Stream.fromAsyncIterable`'s scope
+// finalizer calls `iter.return()`, which — per async-generator semantics —
+// does not resolve until the suspended `await` settles. That would deadlock
+// the run-loop interruption: `iter.return()` never resolves, `Fiber.interrupt`
+// hangs, `/abort` never returns, and the session stays busy in the tool call.
+//
+// Wrap the iterator so `return()` fires the AbortController (propagating the
+// abort signal to the in-flight tool) and resolves immediately, fire-and-forget
+// the real generator return. The tool observes the abort signal and settles,
+// after which the real generator reaches its own end and cleans up.
+function interruptibleAsyncIterable<T>(iterable: AsyncIterable<T>, onReturn: () => void): AsyncIterable<T> {
+  const iterator = iterable[Symbol.asyncIterator]()
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => iterator.next(),
+        return: () => {
+          onReturn()
+          const real = iterator.return ? iterator.return() : Promise.resolve({ done: true, value: undefined })
+          real.catch(() => {})
+          return Promise.resolve({ done: true, value: undefined })
+        },
+        throw: (e) => (iterator.throw ? iterator.throw(e) : Promise.reject(e)),
+      }
+    },
+  }
+}
+
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
 export type StreamInput = {
@@ -370,8 +401,9 @@ const live: Layer.Layer<
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
             const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
-              e instanceof Error ? e : new Error(String(e)),
+            return Stream.fromAsyncIterable(
+              interruptibleAsyncIterable(result.result.fullStream, () => ctrl.abort()),
+              (e) => (e instanceof Error ? e : new Error(String(e))),
             ).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
               Stream.flatMap((events) => Stream.fromIterable(events)),

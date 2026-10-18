@@ -20,7 +20,7 @@ import { toolPath, toolPermissionInfo } from "./tool"
 type Dict = Record<string, unknown>
 
 export type PermissionStage = "permission" | "always" | "reject"
-export type PermissionOption = "once" | "always" | "reject" | "confirm" | "cancel"
+export type PermissionOption = "once" | "always" | "reject" | "confirm" | "permanent" | "cancel"
 
 export type PermissionBodyState = {
   requestID: string
@@ -28,6 +28,8 @@ export type PermissionBodyState = {
   selected: PermissionOption
   message: string
   submitting: boolean
+  always: string[]
+  history: string[][]
 }
 
 export type PermissionInfo = {
@@ -74,6 +76,8 @@ export function createPermissionBodyState(requestID: string): PermissionBodyStat
     selected: "once",
     message: "",
     submitting: false,
+    always: [],
+    history: [],
   }
 }
 
@@ -83,7 +87,7 @@ export function permissionOptions(stage: PermissionStage): PermissionOption[] {
   }
 
   if (stage === "always") {
-    return ["confirm", "cancel"]
+    return ["confirm", "permanent", "cancel"]
   }
 
   return []
@@ -139,15 +143,47 @@ export function permissionLabel(option: PermissionOption): string {
   if (option === "always") return "Allow always"
   if (option === "reject") return "Reject"
   if (option === "confirm") return "Confirm"
+  if (option === "permanent") return "Allow permanently"
   return "Cancel"
 }
 
-export function permissionReply(requestID: string, reply: PermissionReply["reply"], message?: string): PermissionReply {
+export function permissionReply(
+  requestID: string,
+  reply: PermissionReply["reply"],
+  message?: string,
+  patterns?: string[],
+  persist?: boolean,
+): PermissionReply {
   return {
     requestID,
     reply,
     ...(message && message.trim() ? { message: message.trim() } : {}),
+    ...(patterns?.length ? { patterns } : {}),
+    ...(persist ? { persist: true } : {}),
   }
+}
+
+// Shorten a saved pattern one path segment from the right. Stops at the
+// directory that contains the trailing wildcard so the pattern never widens
+// to the filesystem root.
+export function shortenPattern(pattern: string): string {
+  const stem = pattern.replace(/\*+$/, "").replace(/[\\/]+$/, "")
+  const idx = stem.lastIndexOf("/")
+  if (idx <= 0) return pattern
+  return stem.slice(0, idx) + "/*"
+}
+
+export function permissionAlwaysShorten(state: PermissionBodyState): PermissionBodyState {
+  const next = state.always.map(shortenPattern)
+  if (next.every((pattern, i) => pattern === state.always[i])) return state
+  return { ...state, always: next, history: [...state.history, state.always] }
+}
+
+export function permissionAlwaysWiden(state: PermissionBodyState): PermissionBodyState {
+  if (!state.history.length) return state
+  const history = [...state.history]
+  const prev = history.pop()!
+  return { ...state, always: prev, history }
 }
 
 export function permissionShift(state: PermissionBodyState, dir: -1 | 1): PermissionBodyState {
@@ -171,7 +207,12 @@ export function permissionHover(state: PermissionBodyState, option: PermissionOp
   }
 }
 
-export function permissionRun(state: PermissionBodyState, requestID: string, option: PermissionOption): PermissionStep {
+export function permissionRun(
+  state: PermissionBodyState,
+  requestID: string,
+  option: PermissionOption,
+  always?: string[],
+): PermissionStep {
   if (state.submitting) {
     return { state }
   }
@@ -183,6 +224,8 @@ export function permissionRun(state: PermissionBodyState, requestID: string, opt
           ...state,
           stage: "always",
           selected: "confirm",
+          always: always?.length ? always : state.always,
+          history: [],
         },
       }
     }
@@ -219,7 +262,7 @@ export function permissionRun(state: PermissionBodyState, requestID: string, opt
 
   return {
     state,
-    reply: permissionReply(requestID, "always"),
+    reply: permissionReply(requestID, "always", undefined, state.always, option === "permanent"),
   }
 }
 

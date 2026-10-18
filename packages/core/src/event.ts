@@ -6,6 +6,7 @@ import type { Data, Definition, Payload } from "@opencode-ai/schema/event"
 import { and, asc, eq, gt, inArray } from "drizzle-orm"
 import { Database } from "./database/database"
 import { EventSequenceTable, EventTable } from "./event/sql"
+import { Flag } from "./flag/flag"
 import { Location } from "./location"
 import { makeGlobalNode } from "./effect/app-node"
 import { isDeepStrictEqual } from "node:util"
@@ -247,10 +248,10 @@ export const layerWith = (options?: LayerOptions) =>
                             .get()
                             .pipe(Effect.orDie)
                           const latest = row?.seq ?? -1
-                          const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<
-                            string,
-                            unknown
-                          >
+                          // Only needed for the durable log + replay checks. When the log is
+                          // disabled this is never called, avoiding serializing every event.
+                          const encodeData = () =>
+                            Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
                           if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
                             yield* Effect.die(
                               new InvalidDurableEventError({
@@ -269,7 +270,7 @@ export const layerWith = (options?: LayerOptions) =>
                             if (
                               stored?.id === event.id &&
                               stored.type === versionedType(definition.type, durable.version) &&
-                              isDeepStrictEqual(stored.data, encoded)
+                              isDeepStrictEqual(stored.data, encodeData())
                             ) {
                               if (input.ownerID && row?.ownerID == null) {
                                 yield* db
@@ -333,19 +334,21 @@ export const layerWith = (options?: LayerOptions) =>
                             })
                             .run()
                             .pipe(Effect.orDie)
-                          yield* db
-                            .insert(EventTable)
-                            .values([
-                              {
-                                id: event.id,
-                                aggregate_id: aggregateID,
-                                seq,
-                                type: versionedType(definition.type, durable.version),
-                                data: encoded,
-                              },
-                            ])
-                            .run()
-                            .pipe(Effect.orDie)
+                          if (!Flag.OPENCODE_DISABLE_EVENT_LOG) {
+                            yield* db
+                              .insert(EventTable)
+                              .values([
+                                {
+                                  id: event.id,
+                                  aggregate_id: aggregateID,
+                                  seq,
+                                  type: versionedType(definition.type, durable.version),
+                                  data: encodeData(),
+                                },
+                              ])
+                              .run()
+                              .pipe(Effect.orDie)
+                          }
                           return { aggregateID, seq }
                         }),
                       { behavior: "immediate" },

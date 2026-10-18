@@ -13,7 +13,7 @@ import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
 import type { TaskPromptOps } from "@/tool/task"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
 import { SessionProcessor } from "./processor"
@@ -55,6 +55,54 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
   const flags = yield* RuntimeFlags.Service
+
+  // Tool executions run via run.promise (EffectBridge) on the GLOBAL runtime, NOT
+  // as child fibers of the run-loop fiber. When /abort fires, Fiber.interrupt only
+  // targets the run-loop fiber; the in-flight tool fiber would keep running unless
+  // it observes the AI SDK abort signal itself. Abort-aware tools (bash, task, MCP,
+  // skill) settle on their own via ctx.abort; the rest (read, grep, glob, edit,
+  // webfetch, ...) do not, so without this hook a /abort would leave the tool
+  // running in the background even though the session is freed.
+  //
+  // Race each tool effect against the abort signal. On abort, give the tool a short
+  // grace period to settle gracefully (bash returns its truncated output as a
+  // completed result); if it is still running after the grace, force-interrupt the
+  // tool fiber and fail with AbortError so the loop can unwind.
+  const interruptible = <A, E>(
+    effect: Effect.Effect<A, E>,
+    signal: AbortSignal | undefined,
+    graceMs = 500,
+  ): Effect.Effect<A, E | DOMException> => {
+    if (!signal) return effect
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkScoped(effect)
+        const abort = Effect.callback<void>((resume) => {
+          const onAbort = () => resume(Effect.succeed("aborted" as const))
+          if (signal.aborted) {
+            onAbort()
+            return Effect.void
+          }
+          signal.addEventListener("abort", onAbort, { once: true })
+          return Effect.sync(() => signal.removeEventListener("abort", onAbort))
+        })
+        const graceAbort = abort.pipe(
+          Effect.andThen(() => Effect.sleep(`${graceMs} millis`)),
+          Effect.as("aborted" as const),
+        )
+        const outcome = yield* Effect.raceFirst(
+          Fiber.await(fiber).pipe(Effect.map((e) => ({ tag: "fiber" as const, e }))),
+          graceAbort.pipe(Effect.map(() => ({ tag: "abort" as const }))),
+        )
+        if (outcome.tag === "abort") {
+          yield* Fiber.interrupt(fiber).pipe(Effect.ignore)
+          return yield* Effect.fail(new DOMException("Aborted", "AbortError"))
+        }
+        if (outcome.e._tag === "Success") return outcome.e.value
+        return yield* Effect.failCause(outcome.e.cause)
+      }),
+    )
+  }
 
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
     sessionID: input.session.id,
@@ -101,33 +149,36 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       inputSchema: jsonSchema(schema),
       execute(args, options) {
         return run.promise(
-          Effect.gen(function* () {
-            const ctx = context(args, options)
-            yield* plugin.trigger(
-              "tool.execute.before",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
-              { args },
-            )
-            const result = yield* item.execute(args, ctx)
-            const output = {
-              ...result,
-              attachments: result.attachments?.map((attachment) => ({
-                ...attachment,
-                id: PartID.ascending(),
-                sessionID: ctx.sessionID,
-                messageID: input.processor.message.id,
-              })),
-            }
-            yield* plugin.trigger(
-              "tool.execute.after",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
-              output,
-            )
-            if (options.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(options.toolCallId, output)
-            }
-            return output
-          }),
+          interruptible(
+            Effect.gen(function* () {
+              const ctx = context(args, options)
+              yield* plugin.trigger(
+                "tool.execute.before",
+                { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+                { args },
+              )
+              const result = yield* item.execute(args, ctx)
+              const output = {
+                ...result,
+                attachments: result.attachments?.map((attachment) => ({
+                  ...attachment,
+                  id: PartID.ascending(),
+                  sessionID: ctx.sessionID,
+                  messageID: input.processor.message.id,
+                })),
+              }
+              yield* plugin.trigger(
+                "tool.execute.after",
+                { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+                output,
+              )
+              if (options.abortSignal?.aborted) {
+                yield* input.processor.completeToolCall(options.toolCallId, output)
+              }
+              return output
+            }),
+            options.abortSignal,
+          ),
         )
       },
     })
@@ -154,67 +205,70 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       ),
       execute(args, opts) {
         return run.promise(
-          Effect.gen(function* () {
-            const parsed = parseListMcpResourcesArgs(args)
-            const ctx = context(toRecord(args), opts)
-            const clients = yield* mcp.clients()
-            const resourceServers = Object.entries(clients)
-              .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
-              .map((entry) => entry[0])
-              .sort((a, b) => a.localeCompare(b))
-            if (parsed.server && !resourceServers.includes(parsed.server)) {
-              throw new Error(
-                resourceServers.length === 0
-                  ? `MCP server "${parsed.server}" does not support resources`
-                  : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
+          interruptible(
+            Effect.gen(function* () {
+              const parsed = parseListMcpResourcesArgs(args)
+              const ctx = context(toRecord(args), opts)
+              const clients = yield* mcp.clients()
+              const resourceServers = Object.entries(clients)
+                .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
+                .map((entry) => entry[0])
+                .sort((a, b) => a.localeCompare(b))
+              if (parsed.server && !resourceServers.includes(parsed.server)) {
+                throw new Error(
+                  resourceServers.length === 0
+                    ? `MCP server "${parsed.server}" does not support resources`
+                    : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
+                )
+              }
+              const permissionPatterns = parsed.server
+                ? [`mcp:${parsed.server}:*`]
+                : resourceServers.map((server) => `mcp:${server}:*`)
+              yield* plugin.trigger(
+                "tool.execute.before",
+                { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId },
+                { args },
               )
-            }
-            const permissionPatterns = parsed.server
-              ? [`mcp:${parsed.server}:*`]
-              : resourceServers.map((server) => `mcp:${server}:*`)
-            yield* plugin.trigger(
-              "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId },
-              { args },
-            )
-            yield* ctx.ask({
-              permission: "read",
-              metadata: parsed.server ? { server: parsed.server } : {},
-              patterns: permissionPatterns,
-              always: permissionPatterns,
-            })
+              yield* ctx.ask({
+                permission: "read",
+                metadata: parsed.server ? { server: parsed.server } : {},
+                patterns: permissionPatterns,
+                always: permissionPatterns,
+              })
 
-            const resources = Object.values(yield* mcp.resources(parsed.server))
-            const filtered = resources
-              .filter((resource) => !parsed.server || resource.client === parsed.server)
-              .toSorted((a, b) =>
-                (a.client + "\u0000" + a.name + "\u0000" + a.uri).localeCompare(
-                  b.client + "\u0000" + b.name + "\u0000" + b.uri,
-                ),
+              const resources = Object.values(yield* mcp.resources(parsed.server))
+              const filtered = resources
+                .filter((resource) => !parsed.server || resource.client === parsed.server)
+                .toSorted((a, b) =>
+                  (a.client + "\u0000" + a.name + "\u0000" + a.uri).localeCompare(
+                    b.client + "\u0000" + b.name + "\u0000" + b.uri,
+                  ),
+                )
+              const content = JSON.stringify({ resources: filtered.map(formatMcpResource) }, null, 2)
+              const truncated = yield* truncate.output(content, {}, input.agent)
+              const output = {
+                title: parsed.server ? `MCP resources: ${parsed.server}` : "MCP resources",
+                metadata: {
+                  count: filtered.length,
+                  servers: resourceServers,
+                  ...(parsed.server ? { server: parsed.server } : {}),
+                  truncated: truncated.truncated,
+                  ...(truncated.truncated && { outputPath: truncated.outputPath }),
+                },
+                output: truncated.content,
+              }
+              yield* plugin.trigger(
+                "tool.execute.after",
+                { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+                output,
               )
-            const content = JSON.stringify({ resources: filtered.map(formatMcpResource) }, null, 2)
-            const truncated = yield* truncate.output(content, {}, input.agent)
-            const output = {
-              title: parsed.server ? `MCP resources: ${parsed.server}` : "MCP resources",
-              metadata: {
-                count: filtered.length,
-                servers: resourceServers,
-                ...(parsed.server ? { server: parsed.server } : {}),
-                truncated: truncated.truncated,
-                ...(truncated.truncated && { outputPath: truncated.outputPath }),
-              },
-              output: truncated.content,
-            }
-            yield* plugin.trigger(
-              "tool.execute.after",
-              { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
-              output,
-            )
-            if (opts.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(opts.toolCallId, output)
-            }
-            return output
-          }),
+              if (opts.abortSignal?.aborted) {
+                yield* input.processor.completeToolCall(opts.toolCallId, output)
+              }
+              return output
+            }),
+            opts.abortSignal,
+          ),
         )
       },
     })
@@ -237,67 +291,70 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       ),
       execute(args, opts) {
         return run.promise(
-          Effect.gen(function* () {
-            const parsed = parseListMcpResourcesArgs(args)
-            const ctx = context(toRecord(args), opts)
-            const clients = yield* mcp.clients()
-            const resourceServers = Object.entries(clients)
-              .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
-              .map((entry) => entry[0])
-              .sort((a, b) => a.localeCompare(b))
-            if (parsed.server && !resourceServers.includes(parsed.server)) {
-              throw new Error(
-                resourceServers.length === 0
-                  ? `MCP server "${parsed.server}" does not support resources`
-                  : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
+          interruptible(
+            Effect.gen(function* () {
+              const parsed = parseListMcpResourcesArgs(args)
+              const ctx = context(toRecord(args), opts)
+              const clients = yield* mcp.clients()
+              const resourceServers = Object.entries(clients)
+                .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
+                .map((entry) => entry[0])
+                .sort((a, b) => a.localeCompare(b))
+              if (parsed.server && !resourceServers.includes(parsed.server)) {
+                throw new Error(
+                  resourceServers.length === 0
+                    ? `MCP server "${parsed.server}" does not support resources`
+                    : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
+                )
+              }
+              const permissionPatterns = parsed.server
+                ? [`mcp:${parsed.server}:*`]
+                : resourceServers.map((server) => `mcp:${server}:*`)
+              yield* plugin.trigger(
+                "tool.execute.before",
+                { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId },
+                { args },
               )
-            }
-            const permissionPatterns = parsed.server
-              ? [`mcp:${parsed.server}:*`]
-              : resourceServers.map((server) => `mcp:${server}:*`)
-            yield* plugin.trigger(
-              "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId },
-              { args },
-            )
-            yield* ctx.ask({
-              permission: "read",
-              metadata: parsed.server ? { server: parsed.server } : {},
-              patterns: permissionPatterns,
-              always: permissionPatterns,
-            })
+              yield* ctx.ask({
+                permission: "read",
+                metadata: parsed.server ? { server: parsed.server } : {},
+                patterns: permissionPatterns,
+                always: permissionPatterns,
+              })
 
-            const templates = Object.values(yield* mcp.resourceTemplates(parsed.server))
-            const filtered = templates
-              .filter((template) => !parsed.server || template.client === parsed.server)
-              .toSorted((a, b) =>
-                (a.client + "\u0000" + a.name + "\u0000" + a.uriTemplate).localeCompare(
-                  b.client + "\u0000" + b.name + "\u0000" + b.uriTemplate,
-                ),
+              const templates = Object.values(yield* mcp.resourceTemplates(parsed.server))
+              const filtered = templates
+                .filter((template) => !parsed.server || template.client === parsed.server)
+                .toSorted((a, b) =>
+                  (a.client + "\u0000" + a.name + "\u0000" + a.uriTemplate).localeCompare(
+                    b.client + "\u0000" + b.name + "\u0000" + b.uriTemplate,
+                  ),
+                )
+              const content = JSON.stringify({ resourceTemplates: filtered.map(formatMcpResourceTemplate) }, null, 2)
+              const truncated = yield* truncate.output(content, {}, input.agent)
+              const output = {
+                title: parsed.server ? `MCP resource templates: ${parsed.server}` : "MCP resource templates",
+                metadata: {
+                  count: filtered.length,
+                  servers: resourceServers,
+                  ...(parsed.server ? { server: parsed.server } : {}),
+                  truncated: truncated.truncated,
+                  ...(truncated.truncated && { outputPath: truncated.outputPath }),
+                },
+                output: truncated.content,
+              }
+              yield* plugin.trigger(
+                "tool.execute.after",
+                { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+                output,
               )
-            const content = JSON.stringify({ resourceTemplates: filtered.map(formatMcpResourceTemplate) }, null, 2)
-            const truncated = yield* truncate.output(content, {}, input.agent)
-            const output = {
-              title: parsed.server ? `MCP resource templates: ${parsed.server}` : "MCP resource templates",
-              metadata: {
-                count: filtered.length,
-                servers: resourceServers,
-                ...(parsed.server ? { server: parsed.server } : {}),
-                truncated: truncated.truncated,
-                ...(truncated.truncated && { outputPath: truncated.outputPath }),
-              },
-              output: truncated.content,
-            }
-            yield* plugin.trigger(
-              "tool.execute.after",
-              { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
-              output,
-            )
-            if (opts.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(opts.toolCallId, output)
-            }
-            return output
-          }),
+              if (opts.abortSignal?.aborted) {
+                yield* input.processor.completeToolCall(opts.toolCallId, output)
+              }
+              return output
+            }),
+            opts.abortSignal,
+          ),
         )
       },
     })
@@ -324,62 +381,65 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       ),
       execute(args, opts) {
         return run.promise(
-          Effect.gen(function* () {
-            const parsed = parseReadMcpResourceArgs(args)
-            const ctx = context(toRecord(args), opts)
-            const clients = yield* mcp.clients()
-            const client = clients[parsed.server]
-            if (!client) {
-              throw new Error(`MCP server "${parsed.server}" is not connected`)
-            }
-            if (!client.getServerCapabilities()?.resources) {
-              throw new Error(`MCP server "${parsed.server}" does not support resources`)
-            }
-            yield* plugin.trigger(
-              "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId },
-              { args },
-            )
-            yield* ctx.ask({
-              permission: "read",
-              metadata: { server: parsed.server, uri: parsed.uri },
-              patterns: [`mcp:${parsed.server}:${parsed.uri}`],
-              always: [`mcp:${parsed.server}:*`],
-            })
+          interruptible(
+            Effect.gen(function* () {
+              const parsed = parseReadMcpResourceArgs(args)
+              const ctx = context(toRecord(args), opts)
+              const clients = yield* mcp.clients()
+              const client = clients[parsed.server]
+              if (!client) {
+                throw new Error(`MCP server "${parsed.server}" is not connected`)
+              }
+              if (!client.getServerCapabilities()?.resources) {
+                throw new Error(`MCP server "${parsed.server}" does not support resources`)
+              }
+              yield* plugin.trigger(
+                "tool.execute.before",
+                { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId },
+                { args },
+              )
+              yield* ctx.ask({
+                permission: "read",
+                metadata: { server: parsed.server, uri: parsed.uri },
+                patterns: [`mcp:${parsed.server}:${parsed.uri}`],
+                always: [`mcp:${parsed.server}:*`],
+              })
 
-            const content = yield* mcp.readResource(parsed.server, parsed.uri)
-            if (!content) throw new Error(`Failed to read MCP resource: ${parsed.server}/${parsed.uri}`)
+              const content = yield* mcp.readResource(parsed.server, parsed.uri)
+              if (!content) throw new Error(`Failed to read MCP resource: ${parsed.server}/${parsed.uri}`)
 
-            const formatted = formatMcpResourceContent(parsed.server, parsed.uri, content)
-            const truncated = yield* truncate.output(formatted.text, {}, input.agent)
-            const output = {
-              title: `MCP resource: ${parsed.uri}`,
-              metadata: {
-                server: parsed.server,
-                uri: parsed.uri,
-                contents: formatted.contents,
-                attachments: formatted.attachments.length,
-                truncated: truncated.truncated,
-                ...(truncated.truncated && { outputPath: truncated.outputPath }),
-              },
-              output: truncated.content,
-              attachments: formatted.attachments.map((attachment) => ({
-                ...attachment,
-                id: PartID.ascending(),
-                sessionID: ctx.sessionID,
-                messageID: input.processor.message.id,
-              })),
-            }
-            yield* plugin.trigger(
-              "tool.execute.after",
-              { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
-              output,
-            )
-            if (opts.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(opts.toolCallId, output)
-            }
-            return output
-          }),
+              const formatted = formatMcpResourceContent(parsed.server, parsed.uri, content)
+              const truncated = yield* truncate.output(formatted.text, {}, input.agent)
+              const output = {
+                title: `MCP resource: ${parsed.uri}`,
+                metadata: {
+                  server: parsed.server,
+                  uri: parsed.uri,
+                  contents: formatted.contents,
+                  attachments: formatted.attachments.length,
+                  truncated: truncated.truncated,
+                  ...(truncated.truncated && { outputPath: truncated.outputPath }),
+                },
+                output: truncated.content,
+                attachments: formatted.attachments.map((attachment) => ({
+                  ...attachment,
+                  id: PartID.ascending(),
+                  sessionID: ctx.sessionID,
+                  messageID: input.processor.message.id,
+                })),
+              }
+              yield* plugin.trigger(
+                "tool.execute.after",
+                { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+                output,
+              )
+              if (opts.abortSignal?.aborted) {
+                yield* input.processor.completeToolCall(opts.toolCallId, output)
+              }
+              return output
+            }),
+            opts.abortSignal,
+          ),
         )
       },
     })
@@ -397,8 +457,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     item.inputSchema = jsonSchema(transformed)
     item.execute = (args, opts) =>
       run.promise(
-        Effect.gen(function* () {
-          const ctx = context(args, opts)
+        interruptible(
+          Effect.gen(function* () {
+            const ctx = context(args, opts)
           yield* plugin.trigger(
             "tool.execute.before",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
@@ -489,7 +550,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             yield* input.processor.completeToolCall(opts.toolCallId, output)
           }
           return output
-        }),
+          }),
+          opts.abortSignal,
+        ),
       )
     tools[key] = item
   }
