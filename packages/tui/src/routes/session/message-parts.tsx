@@ -84,6 +84,7 @@ export function ReasoningPart(props: {
               done={isDone()}
               title={inMinimal() && !expanded() ? summary().title : null}
               duration={isDone() ? Locale.duration(duration()) : undefined}
+              time={Locale.time(props.part.time?.created ?? props.message.time.created)}
             />
           </box>
         </box>
@@ -123,6 +124,7 @@ function ReasoningHeader(props: {
   done: boolean
   title: string | null
   duration?: string
+  time?: string
 }) {
   const theme = useTheme()
   const fg = () =>
@@ -148,7 +150,7 @@ function ReasoningHeader(props: {
             <span>{props.open ? "- " : "+ "}</span>
           </Show>
           <span>Thought</span>
-          <Show when={props.title || props.duration}>
+          <Show when={props.title || props.duration || props.time}>
             <span>: </span>
           </Show>
           <Show when={props.title}>
@@ -158,6 +160,12 @@ function ReasoningHeader(props: {
             <span>
               {props.title ? " · " : ""}
               {props.duration}
+            </span>
+          </Show>
+          <Show when={props.time}>
+            <span>
+              {props.title || props.duration ? " · " : ""}
+              {props.time}
             </span>
           </Show>
         </text>
