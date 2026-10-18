@@ -305,9 +305,44 @@ Still open after this session: background subagent controls
 end-to-end sandbox secure-input test through an interactive client (automated coverage
 exists; see `MIGRATION-INVENTORY.md`); and the final cutover.
 
-Verification for this session: `packages/core` `bun run test` = 6375 pass / 0 fail / 365 skip;
+Verification for this session: `packages/core` `bun run test` = 6379 pass / 0 fail / 365 skip;
 root `bun run typecheck` = 34/34 packages; `oxlint` clean on changed files; CLI built to
 `/home/gunther/opencode-v2-sandbox/build-ports-202610181012` reporting
 `0.0.0-local-v2-ports-202610181012`, with `opencode attach` registered, the `opencode.tool` RPC
 listing and invoking a tool end to end, and mux tools registering. No production service was
 built, deployed, restarted, or committed (except the local repo commits below).
+
+## Deploying the reviewed binary (not yet done)
+
+Production already runs v2 (the `opencode-v2-cutover-20261017` binary via the `v2.conf`
+drop-in). Deploying this session's reviewed build is the remaining operational step and needs
+explicit go-ahead; it restarts `opencode.service` (and, via `BindsTo`, the Telegram bot), which
+ends any in-flight session. Use `opencode-restart.sh --delayed` so the restart survives the
+session it triggers, and keep the rollback path.
+
+```bash
+# 1. back up the running binary (it is a symlink; copy the real file)
+cp -L ~/.opencode/bin/opencode ~/.opencode/bin/opencode.backup-$(date +%Y%m%d%H%M)
+
+# 2. stage the reviewed build and repoint the symlink
+cp /home/gunther/opencode-v2-sandbox/build-ports-202610181012/cli-linux-x64/bin/opencode \
+   ~/.opencode/bin/opencode-v2-ports-202610181012
+ln -sfn ~/.opencode/bin/opencode-v2-ports-202610181012 ~/.opencode/bin/opencode
+
+# 3. ordered delayed restart (waits for /api/info, then starts the bot)
+~/opencode-dev/infra/opencode-restart.sh --delayed
+
+# 4. verify
+~/.opencode/bin/opencode --version   # expect 0.0.0-local-v2-ports-202610181012
+```
+
+Rollback:
+
+```bash
+cp -L ~/.opencode/bin/opencode.backup-<stamp> ~/.opencode/bin/opencode
+~/opencode-dev/infra/opencode-restart.sh --delayed
+```
+
+Note: the base unit still sets `OPENCODE_DISABLE_EVENT_LOG=1` (inherited from v1). v2 ignores
+it (the durable `event` table is the system of record), so it is harmless but misleading; drop
+it from the unit when convenient.
