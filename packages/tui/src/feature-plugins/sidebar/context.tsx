@@ -1,7 +1,6 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { createMemo, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, Show } from "solid-js"
 import { contextUsage } from "../../util/session"
-import { useConfig } from "../../config"
 
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -10,15 +9,31 @@ const money = new Intl.NumberFormat("en-US", {
 
 export function SidebarContext(props: { context: Plugin.Context; sessionID: string }) {
   const theme = props.context.theme
-  const config = useConfig()
   const msg = createMemo(() => props.context.data.session.message.list(props.sessionID))
   const session = createMemo(() => props.context.data.session.get(props.sessionID))
   const cost = createMemo(() => props.context.data.session.cost(props.sessionID))
-  // Session budget (set from the client) wins over the configured default.
+  // The TUI's own config store is cli.json, not the server config. Merge the server config
+  // documents (lowest→highest priority) to find the configured budget, then let a per-session
+  // budget (set from a client) win.
+  const [configLimit, setConfigLimit] = createSignal<number>()
+  createEffect(() => {
+    const location = session()?.location
+    void props.context.client.config
+      .get({ location })
+      .then((entries) => {
+        let limit: number | undefined
+        for (const entry of entries) {
+          if (entry.type !== "document") continue
+          const value = (entry.info as { budget?: { maxCost?: number } } | undefined)?.budget?.maxCost
+          if (value !== undefined) limit = value
+        }
+        setConfigLimit(limit)
+      })
+      .catch(() => {})
+  })
   const costLimit = createMemo(() => {
     const budget = (session()?.metadata as { budget?: { maxCost?: number } } | undefined)?.budget
-    if (budget?.maxCost !== undefined) return budget.maxCost
-    return (config.data as { budget?: { maxCost?: number } } | undefined)?.budget?.maxCost
+    return budget?.maxCost ?? configLimit()
   })
 
   const state = createMemo(() =>
