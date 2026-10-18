@@ -21,8 +21,8 @@ behavior (verified in V2 source) · **n/a** = architecture-specific, intentional
 | bdb8b894b1 | replace `__SECURE_INPUT__` marker with trusted nested MCP requests | **covered** — same V2 secure-input architecture |
 | 4f09d6a361 | pending fork modifications (database, attach, session, openai-chat) | mixed: DB naming **covered**; `attach` **done** (restored); openai-chat provider n/a |
 | dabec2c9d3 | docs: fork notice | n/a |
-| 4256506ce9 | auto-scope mux session names per opencode session | **open** — V2 sends `ai.opencode/sessionID` (dual-key port done); mux-side isolation test gate remains |
-| abfd6cc504 | transparent mux session scoping | **open** — same gate |
+| 4256506ce9 | auto-scope mux session names per opencode session | **done** — `scopeMuxSessionArgs` in `core/src/mcp/index.ts`; `test/mcp-session-scope.test.ts` |
+| abfd6cc504 | transparent mux session scoping | **done** — same mechanism |
 | 505a92a811 | MCP tool results show expandable output in TUI | **open** — V2 TUI tool rendering differs; verify |
 | 4567245c62 | default generic tool output to visible so mux results are shown | **open** — verify V2 TUI |
 | 3b2463237c | strip session prefix from mux tool responses | **open** — verify V2 TUI |
@@ -67,8 +67,11 @@ behavior (verified in V2 source) · **n/a** = architecture-specific, intentional
 
 1. Background subagent controls (`tasks`/`task_status`/`task_wait`/`task_cancel`) — deliberately
    NOT replayed: V2's `subagent` tool auto-notifies on completion and its guidance forbids polling.
-2. Mux two-session isolation end-to-end test.
-3. Telegram / voice / watchdog integration migration off the hard-coded `:4096`.
-4. Sandbox TUI end-to-end secure-input test; rebuilt reviewed binary; final cutover.
-5. Optional: if the `Api` type complexity is reduced, move the `opencode.tool` RPC methods to
+2. Sandbox end-to-end secure-input test through an interactive client: the MCP secure-input protocol
+   is covered by the automated `mcp-secure-input` tests; a scripted HTTP run in the sandbox could not
+   align the location of the tool invocation with the session-location reply route (the TUI passes the
+   session's location ref, which aligns). Verify through the TUI, not raw HTTP.
+3. Final cutover (restart production on the reviewed binary) — needs explicit go-ahead; it ends the
+   current session and must follow the recovery guide.
+4. Optional: if the `Api` type complexity is reduced, move the `opencode.tool` RPC methods to
    first-class `tool.list`/`tool.invoke` HttpApi endpoints (currently blocked by a tsgo ceiling).

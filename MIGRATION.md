@@ -270,6 +270,19 @@ ported onto this checkout, each with a focused test where practical:
    existing group). The RPC surface already exists (`server.rpc`), so it adds no `Api`
    surface. If the `Api` complexity is later reduced (or tsgo fixed), migrating the RPC
    methods to first-class `tool.list`/`tool.invoke` endpoints is straightforward.
+6. **Mux cross-session isolation.** `MCP.callTool` now scopes every logical mux session
+   name with the caller's opencode session (`scopeMuxSessionArgs`), so two sessions cannot
+   collide on a name like `ad00` and mutate shared pty state. Idempotent; non-mux servers
+   untouched. Two-session behavior covered by `test/mcp-session-scope.test.ts`.
+7. **Integration migration.** Voice daemon (`voice/voice-daemon.py`) moved to the v2 API
+   (`/api/*`, basic auth from `server.env`, V2 event envelope/`session.text.delta`, interrupt
+   route). Infra watchdog/restart probe `/api/info` with auth; the event-prune script now
+   refuses to run on v2 (the `event` table is the durable system of record). Situation-report
+   helpers (`oc-dispatch`, `oc-sessions`, `oc-ledger`, `oc-session-state`, `oc-move-session`)
+   moved to `/api/*` and the `session_v2`/`session_message` tables; the move script now uses
+   `POST /api/session/:id/move` + `PATCH /api/session/:id`. The Telegram bot was already on the
+   v2 SDK. Note: `voice/`, `situation-report/` are not git repos, so those files are not
+   committed (the repos that are — opencode-v2, infra, mux, bot — are).
 
 Dispositions from the old inventory that are composed differently in V2 and were verified
 as already covered, so they were intentionally NOT replayed:
@@ -288,12 +301,13 @@ as already covered, so they were intentionally NOT replayed:
 
 Still open after this session: background subagent controls
 (`tasks`/`task_status`/`task_wait`/`task_cancel`) — deliberately NOT replayed, since V2's
-`subagent` tool auto-notifies on completion and its own guidance forbids polling; the mux
-two-session isolation test, Telegram/voice/watchdog integration migration, an end-to-end
-sandbox TUI secure-input test, the rebuilt reviewed binary, and the final cutover.
+`subagent` tool auto-notifies on completion and its own guidance forbids polling; an
+end-to-end sandbox secure-input test through an interactive client (automated coverage
+exists; see `MIGRATION-INVENTORY.md`); and the final cutover.
 
 Verification for this session: `packages/core` `bun run test` = 6375 pass / 0 fail / 365 skip;
 root `bun run typecheck` = 34/34 packages; `oxlint` clean on changed files; CLI built to
-`/home/gunther/opencode-v2-sandbox/build-ports-202610180406` reporting
-`0.0.0-local-v2-ports-202610180406`, with `opencode attach` registered and failing cleanly
-without a URL. No production service was built, deployed, restarted, or committed.
+`/home/gunther/opencode-v2-sandbox/build-ports-202610181012` reporting
+`0.0.0-local-v2-ports-202610181012`, with `opencode attach` registered, the `opencode.tool` RPC
+listing and invoking a tool end to end, and mux tools registering. No production service was
+built, deployed, restarted, or committed (except the local repo commits below).

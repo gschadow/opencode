@@ -141,6 +141,24 @@ export interface Interface extends State.Transformable<Editor> {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
 
+/**
+ * mux keeps one global session registry, so two opencode sessions could collide on a logical
+ * name like "ad00" and mutate shared state. Transparently suffix each logical mux session name
+ * with the caller's opencode session, so the model keeps using simple names. Idempotent: an
+ * already-suffixed name is left alone. Non-mux servers are untouched.
+ */
+export const scopeMuxSessionArgs = (
+  server: string,
+  args: Record<string, unknown> | undefined,
+  sessionID: string | undefined,
+) => {
+  if (server !== "mux" || sessionID === undefined || args === undefined) return args
+  if (typeof args.name !== "string") return args
+  const suffix = "_" + sessionID.slice(-8).replace(/[^a-zA-Z0-9]/g, "")
+  if (args.name.endsWith(suffix)) return args
+  return { ...args, name: args.name + suffix }
+}
+
 export const Options = Schema.Struct({
   clientInfo: Schema.optional(
     Schema.Struct({
@@ -679,7 +697,11 @@ export const layer = (options?: Options) =>
               message: unavailable(target.name, target.entry.status),
             })
           const result = yield* recovering(target.name, target.entry, target.entry.client, (connection) =>
-            connection.callTool({ name: input.name, args: input.args, sessionID: input.sessionID }),
+            connection.callTool({
+              name: input.name,
+              args: scopeMuxSessionArgs(target.name, input.args, input.sessionID),
+              sessionID: input.sessionID,
+            }),
           ).pipe(
             Effect.mapError(
               (error) =>
