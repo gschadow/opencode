@@ -181,6 +181,14 @@ This fork of `anomalyco/opencode` adds the following changes not present upstrea
   so a connection refused error (server not ready yet) just retries with
   exponential backoff instead of terminating reconnection forever.
 
+- **Cross-build flags for `script/build.ts`** (`packages/opencode/script/build.ts`) —
+  `--target=<target[,target]>` (e.g. `--target=windows-x64`, matching the
+  `dist/` directory names without the `opencode-` prefix) builds only the named
+  targets, and `--out=<dir>` writes artifacts somewhere other than `./dist` so a
+  cross-build never clobbers the running local build. Bun can cross-compile, so
+  a Windows binary is produced on Linux with
+  `bun run script/build.ts --target=windows-x64 --out=dist-win64`.
+
 ---
 
 **Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
